@@ -5,6 +5,10 @@
 | [课程任务书](taskbook.pdf) | 2026年10月8日原始任务书，作为课程要求与最终验收的依据 |
 | [产品设计](product-design.md) | 用户、MVP 范围、业务流程、产品规则和交付目标 |
 | [技术方案](technical-plan.md) | 技术选型、模块职责、数据一致性、权限、测试和部署安排 |
+| [业务决策与验收](acceptance.md) | 已确认规则与T01至T15需求测试追踪 |
+| [接口契约](api-contract.md) | 两个后端与前端、内部身份及限制协议 |
+| [运行与部署](deployment.md) | 本地运行、容器部署、CI与回滚步骤 |
+| [实现与验证记录](implementation.md) | 实现范围、实际验证结果及剩余交付条件 |
 
 产品设计确定业务目标，技术方案说明如何实现。产品设计中尚未确定的业务规则，需要先补充验收标准，再落实到实现和测试。
 
@@ -12,7 +16,7 @@
 
 项目文档统一保存在 `docs/`。根目录的 [AGENTS.md](../AGENTS.md) 是项目开发规则，保留在根目录，使其适用于整个项目。后续新增的接口说明、验收标准、部署说明和决策记录也放入 `docs/`，并在本索引登记。
 
-当前仓库处于方案阶段。已有的 [文档测试](../tests/test_documentation.py) 检查文档本地链接和索引完整性，运行方式为：
+应用源码位于 `frontend/` 和 `backend/`，部署配置位于 `deploy/`。已有的 [文档测试](../tests/test_documentation.py) 检查文档本地链接和索引完整性，运行方式为：
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v

@@ -224,6 +224,21 @@ class MarkdownScannerTests(unittest.TestCase):
 
 
 class DocumentationIntegrityTests(unittest.TestCase):
+    def test_implementation_rules_and_acceptance_are_linked(self):
+        decisions = PROJECT_ROOT / "docs" / "acceptance.md"
+        contract = PROJECT_ROOT / "docs" / "api-contract.md"
+        self.assertTrue(decisions.is_file())
+        self.assertTrue(contract.is_file())
+        for filename in ("product-design.md", "technical-plan.md"):
+            document = PROJECT_ROOT / "docs" / filename
+            linked = {local_target(destination, document, PROJECT_ROOT)
+                      for destination in markdown_destinations(document.read_text(encoding="utf-8"))}
+            self.assertIn(decisions.resolve(), linked,
+                          "implementation must use the confirmed acceptance decisions")
+        acceptance = decisions.read_text(encoding="utf-8")
+        for number in range(1, 16):
+            self.assertIn("T%02d" % number, acceptance)
+
     def test_all_documentation_local_links_resolve(self):
         documents = sorted((PROJECT_ROOT / "docs").rglob("*.md"))
         self.assertTrue(documents, "docs must contain Markdown documentation")

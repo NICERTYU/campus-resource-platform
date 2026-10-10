@@ -233,16 +233,22 @@ class DocumentationIntegrityTests(unittest.TestCase):
                     document.read_text(encoding="utf-8"), document, PROJECT_ROOT,
                 ), [])
 
-    def test_docs_index_links_to_product_design_and_technical_plan(self):
+    def test_docs_index_links_to_all_top_level_documents(self):
         index = PROJECT_ROOT / "docs" / "README.md"
         self.assertTrue(index.is_file(), "docs/README.md index is missing")
         targets = {
             local_target(destination, index, PROJECT_ROOT)
             for destination in markdown_destinations(index.read_text(encoding="utf-8"))
         }
-        for filename in ("product-design.md", "technical-plan.md"):
-            with self.subTest(filename=filename):
-                self.assertIn((index.parent / filename).resolve(), targets)
+        documents = sorted(
+            document for document in index.parent.iterdir()
+            if document.is_file() and document.suffix.casefold() in {".md", ".pdf"}
+            and document != index
+        )
+        self.assertTrue(documents, "docs index must describe project documents")
+        for document in documents:
+            with self.subTest(filename=document.name):
+                self.assertIn(document.resolve(), targets)
 
 
 if __name__ == "__main__":

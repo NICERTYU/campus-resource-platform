@@ -1,0 +1,11 @@
+**/target/
+**/node_modules/
+frontend/dist/
+frontend/playwright-report/
+frontend/test-results/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+.local/
+*.log

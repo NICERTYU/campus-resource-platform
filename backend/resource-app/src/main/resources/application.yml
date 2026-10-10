@@ -1,0 +1,38 @@
+server:
+  port: ${SERVER_PORT:8081}
+  servlet:
+    session:
+      timeout: 8h
+      cookie:
+        http-only: true
+        same-site: lax
+        secure: ${COOKIE_SECURE:false}
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/campus}
+    username: ${DB_USERNAME:campus_resource}
+    password: ${DB_PASSWORD}
+    hikari:
+      schema: resource
+  flyway:
+    default-schema: resource
+    schemas: resource
+    create-schemas: true
+  jackson:
+    time-zone: Asia/Shanghai
+campus:
+  module-key: ${MODULE_KEY}
+  seed: false
+  timeout-scan-ms: 30000
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  info:
+    env:
+      enabled: true
+info:
+  app:
+    name: resource-app
+    commit: ${BUILD_COMMIT:local}

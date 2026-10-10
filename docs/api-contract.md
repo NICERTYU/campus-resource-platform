@@ -1,6 +1,6 @@
 # MVP 接口契约
 
-外部接口前缀 `/api/v1`，JSON 使用 camelCase。错误为 `{code, message, requestId}`，状态码遵循技术方案。列表直接返回数组；MVP 每次最多返回200条记录。所有时间使用带偏移 ISO 8601，校园时区 Asia/Shanghai。浏览器同源 Cookie 登录，写请求携带 `X-CSRF-TOKEN`，可携带 `Idempotency-Key`（同用户、动作、键重复返回原结果，同键不同内容409）。
+外部接口前缀 `/api/v1`，JSON 使用 camelCase。错误为 `{code, message, requestId}`，状态码遵循技术方案。列表直接返回数组；预约、违约、申请、工单与操作日志支持 `page`（从1开始，默认1）、`pageSize`（默认50，范围1至200），按稳定时间/ID倒序分页，越界参数400。个人预约列表另支持 `statusGroup=current|history|all`（默认all），先按当前/历史筛选再分页。空间选择列表首版上限200条。所有时间使用带偏移 ISO 8601，校园时区 Asia/Shanghai。浏览器同源 Cookie 登录，写请求携带 `X-CSRF-TOKEN`，可携带 `Idempotency-Key`（同用户、动作、键重复返回原结果，同键不同内容409）。幂等结果在首版永久保留，暂无自动清理；资源请求键最大150字符，流程请求键最大128字符。
 
 ## 资源应用（8081）
 

@@ -1,0 +1,9 @@
+.git
+.local
+**/node_modules
+**/target
+frontend/dist
+frontend/playwright-report
+frontend/test-results
+.env
+**/*.log

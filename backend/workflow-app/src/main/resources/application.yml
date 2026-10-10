@@ -1,0 +1,30 @@
+server:
+  port: ${SERVER_PORT:8082}
+spring:
+  application:
+    name: campus-workflow
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/campus?currentSchema=workflow}
+    username: ${DB_USERNAME:campus_workflow}
+    password: ${DB_PASSWORD}
+    hikari:
+      connection-init-sql: SET search_path TO workflow
+  flyway:
+    schemas: workflow
+    default-schema: workflow
+workflow:
+  resource-url: ${RESOURCE_URL:http://localhost:8081}
+  module-key: ${MODULE_KEY}
+  retry-delay-ms: ${RETRY_DELAY_MS:5000}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  info:
+    env:
+      enabled: true
+info:
+  app:
+    name: campus-workflow
+    commit: ${BUILD_COMMIT:development}

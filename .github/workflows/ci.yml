@@ -1,0 +1,159 @@
+name: Verify and release campus MVP
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      production:
+        description: Deploy this verified commit to the protected production environment
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Documentation, backend PostgreSQL/HTTP and frontend tests
+        run: ./scripts/test.sh
+      - name: Start real two-app stack
+        run: |
+          E2E_CLOCK=$(python3 -c 'import datetime as d; print((d.datetime.now(d.timezone.utc)+d.timedelta(days=2)).replace(hour=1,minute=50,second=0,microsecond=0).isoformat())')
+          echo "E2E_CLOCK=$E2E_CLOCK" >> "$GITHUB_ENV"
+          export E2E_CLOCK
+          ./scripts/dev.sh > /tmp/campus-dev.log 2>&1 &
+          ./scripts/wait-health.sh http://127.0.0.1:5173
+      - name: Black-box HTTP acceptance
+        env:
+          CAMPUS_BASE_URL: http://127.0.0.1:5173
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_system_http.py -v
+      - name: Actual two-app network failure and restart recovery
+        env:
+          CAMPUS_BASE_URL: http://127.0.0.1:5173
+          CAMPUS_NETWORK_TEST: '1'
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_network_recovery.py -v
+      - name: Actual database account isolation
+        env:
+          CAMPUS_DB_TEST: '1'
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_database_boundary.py -v
+      - name: Chromium browser acceptance
+        working-directory: frontend
+        run: |
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+      - name: Build all deployment images
+        env:
+          BUILD_COMMIT: ${{ github.sha }}
+        run: docker compose --env-file .local/dev.env -f deploy/compose.yml build
+      - name: Package verified images and source
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p .local/artifact
+          docker save campus-resource:${{ github.sha }} campus-workflow:${{ github.sha }} campus-web:${{ github.sha }} | gzip > .local/artifact/images-${{ github.sha }}.tar.gz
+          git archive --format=tar.gz -o .local/artifact/source-${{ github.sha }}.tar.gz ${{ github.sha }}
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
+        with:
+          name: campus-${{ github.sha }}
+          path: .local/artifact/
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verification-logs
+          path: |
+            backend/*/target/surefire-reports/
+            frontend/playwright-report/
+            .local/*.log
+  deploy-test:
+    needs: verify
+    if: github.event_name == 'push' && vars.AUTO_DEPLOY_TEST == 'true'
+    runs-on: ubuntu-latest
+    environment: campus-test
+    concurrency:
+      group: campus-test-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: campus-${{ github.sha }}
+          path: .local/artifact
+      - name: Skip superseded commit
+        id: latest
+        run: |
+          latest=$(git ls-remote origin refs/heads/main | cut -f1)
+          [[ "$latest" == "$GITHUB_SHA" ]] && echo 'current=true' >> "$GITHUB_OUTPUT" || echo 'current=false' >> "$GITHUB_OUTPUT"
+      - name: Install verified complete release
+        if: steps.latest.outputs.current == 'true'
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          DEPLOY_ROOT: ${{ secrets.DEPLOY_ROOT }}
+          DEPLOY_ENV_FILE: ${{ secrets.DEPLOY_ENV_FILE }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/campus_key
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/campus_key -p "${SSH_PORT:-22}" "$SSH_USER@$SSH_HOST" 'mkdir -p incoming'
+          scp -i ~/.ssh/campus_key -P "${SSH_PORT:-22}" .local/artifact/* "$SSH_USER@$SSH_HOST:incoming/"
+          printf -v remote_cmd 'bash -s -- %q %q %q %q' "$DEPLOY_ROOT" "$GITHUB_SHA" "$DEPLOY_ENV_FILE" campus-test
+          ssh -i ~/.ssh/campus_key -p "${SSH_PORT:-22}" "$SSH_USER@$SSH_HOST" "$remote_cmd" < deploy/remote-install.sh
+      - name: Deployment HTTP smoke
+        if: steps.latest.outputs.current == 'true'
+        env:
+          SMOKE_URL: ${{ vars.SMOKE_URL }}
+        run: |
+          curl --fail --retry 5 "$SMOKE_URL/"
+          curl --fail --retry 5 "$SMOKE_URL/api/v1/auth/csrf" | python3 -c 'import json,sys; assert json.load(sys.stdin)["token"]'
+          status=$(curl -sS -o /tmp/workflow-smoke.json -w '%{http_code}' "$SMOKE_URL/api/v1/classroom-applications")
+          [[ "$status" == 401 ]]
+          python3 -c 'import json; assert json.load(open("/tmp/workflow-smoke.json"))["code"] == "UNAUTHENTICATED"'
+  deploy-production:
+    needs: verify
+    if: github.event_name == 'workflow_dispatch' && inputs.production
+    runs-on: ubuntu-latest
+    environment: campus-prod
+    concurrency:
+      group: campus-prod-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: campus-${{ github.sha }}
+          path: .local/artifact
+      - name: Deploy same verified release after environment approval
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          DEPLOY_ROOT: ${{ secrets.DEPLOY_ROOT }}
+          DEPLOY_ENV_FILE: ${{ secrets.DEPLOY_ENV_FILE }}
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/campus_key
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh -i ~/.ssh/campus_key -p "${SSH_PORT:-22}" "$SSH_USER@$SSH_HOST" 'mkdir -p incoming'
+          scp -i ~/.ssh/campus_key -P "${SSH_PORT:-22}" .local/artifact/* "$SSH_USER@$SSH_HOST:incoming/"
+          printf -v remote_cmd 'bash -s -- %q %q %q %q' "$DEPLOY_ROOT" "$GITHUB_SHA" "$DEPLOY_ENV_FILE" campus-prod
+          ssh -i ~/.ssh/campus_key -p "${SSH_PORT:-22}" "$SSH_USER@$SSH_HOST" "$remote_cmd" < deploy/remote-install.sh

@@ -13,13 +13,14 @@ tar -xzf "incoming/source-$revision.tar.gz" -C "$release_dir"
 gzip -dc "incoming/images-$revision.tar.gz" | docker load
 export BUILD_COMMIT="$revision"
 compose=(docker compose --env-file "$env_file" -p "$project" -f "$release_dir/deploy/compose.yml")
-"${compose[@]}" up -d --no-build --wait --wait-timeout 180
-"${compose[@]}" exec -T resource curl -fsS http://localhost:8081/actuator/health
-"${compose[@]}" exec -T workflow curl -fsS http://localhost:8082/actuator/health
+# Keep the SSH-fed script stdin away from Compose commands.
+"${compose[@]}" up -d --no-build --wait --wait-timeout 180 </dev/null
+"${compose[@]}" exec -T --interactive=false resource curl -fsS http://localhost:8081/actuator/health
+"${compose[@]}" exec -T --interactive=false workflow curl -fsS http://localhost:8082/actuator/health
 previous_file="$deploy_root/$project.current"
 if [[ -f "$previous_file" ]]; then cp "$previous_file" "$deploy_root/$project.previous"; fi
 printf '%s\n' "$revision" > "$previous_file"
-"${compose[@]}" exec -T db psql -U campus_owner -d campus -c \
+"${compose[@]}" exec -T --interactive=false db psql -U campus_owner -d campus -c \
   'SELECT version,description,success FROM resource.flyway_schema_history UNION ALL SELECT version,description,success FROM workflow.flyway_schema_history' \
   > "$deploy_root/releases/$revision/migrations-$project.txt"
 echo "Deployed $project $revision"

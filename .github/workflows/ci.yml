@@ -34,7 +34,7 @@ jobs:
           echo "E2E_CLOCK=$E2E_CLOCK" >> "$GITHUB_ENV"
           export E2E_CLOCK
           ./scripts/dev.sh > /tmp/campus-dev.log 2>&1 &
-          ./scripts/wait-health.sh http://127.0.0.1:5173
+          ./scripts/wait-health.sh http://127.0.0.1:5173 300
       - name: Black-box HTTP acceptance
         env:
           CAMPUS_BASE_URL: http://127.0.0.1:5173

@@ -1,5 +1,7 @@
 # 校园资源服务平台
 
+[![CI](https://github.com/NICERTYU/campus-resource-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/NICERTYU/campus-resource-platform/actions/workflows/ci.yml)
+
 Vue3 + Spring Boot双应用 + PostgreSQL的校园预约与报修MVP。产品与技术约定见[文档索引](docs/README.md)。
 
 本地需Java21、Node24 LTS、Docker及Python3；运行：

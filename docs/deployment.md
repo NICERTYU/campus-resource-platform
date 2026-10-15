@@ -57,6 +57,8 @@ docker compose --env-file .local/test.env -p campus-test -f deploy/compose.yml u
 
 [CI配置](../.github/workflows/ci.yml) 对提交/PR执行静态、业务、真实HTTP、浏览器验收，然后构建3个镜像，以Git commit命名，打包镜像及源码为制品。只有全部检查通过才可发布。
 
+CI首次启动双应用时最多等待前端入口300秒，覆盖镜像下载、构建和初始化。`scripts/wait-health.sh HTTP_URL [TIMEOUT_SECONDS]` 默认等待60秒，超时参数为1–86400的正整数；每次连接及请求最多5秒，并限制在剩余等待时间内。就绪退出0，超时退出1，参数错误退出2。
+
 测试自动部署：在GitHub配置 `AUTO_DEPLOY_TEST=true`；创建 `campus-test` environment，设置 `SSH_HOST, SSH_USER, SSH_PORT, SSH_KEY, SSH_KNOWN_HOSTS, DEPLOY_ROOT, DEPLOY_ENV_FILE` Secrets。`SMOKE_URL` 是环境公开入口URL变量。SSH known_hosts需运维预先核对，执行器及成员的SSH来源须加入云安全组。服务器需Docker Compose、Python3、flock，实际部署文件路径必须为绝对路径，凭据文件留在服务器。
 
 发布只安装CI验证的镜像，不在服务器重新编译。测试任务串行，并在执行前核对main最新提交，避免旧流水线覆盖新版本。全组3个镜像一次更新，迁移自动执行；应用健康检查、Flyway历史与提交记录随发布保存。`/actuator/info` 在容器内部提供commit信息。

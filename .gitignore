@@ -6,6 +6,12 @@ frontend/test-results/
 __pycache__/
 *.pyc
 .env
+.env.*
+*.env
+!*.env.example
 .DS_Store
 .local/
 *.log
+output/resume/
+tools/resume/
+tools/clash/

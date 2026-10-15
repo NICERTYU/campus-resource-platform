@@ -44,7 +44,7 @@ Python全量验收通过时启用了 `CAMPUS_BASE_URL`、`CAMPUS_NETWORK_TEST=1`
 
 ## 环境接入与待验证事项（2026-10-15更新）
 
-公开仓库已配置为 [NICERTYU/campus-resource-platform](https://github.com/NICERTYU/campus-resource-platform)，CI及自动部署结果见[GitHub Actions工作流记录](https://github.com/NICERTYU/campus-resource-platform/actions/workflows/ci.yml)。云测试主机、SSH及测试部署配置已接入，一套测试环境已通过公开HTTP验证。域名及HTTPS、生产审批发布、线上回退和目标主机负载容量尚未验证。当前主机仅运行一套测试环境，不能据此认定能够同时承载开发、测试和生产环境。预算也未经过实际负载与租期费用核对。
+公开仓库已配置为 [NICERTYU/campus-resource-platform](https://github.com/NICERTYU/campus-resource-platform)，CI及自动部署结果见[GitHub Actions工作流记录](https://github.com/NICERTYU/campus-resource-platform/actions/workflows/ci.yml)。云测试主机、SSH及测试部署配置已接入，一套测试环境已通过公开入口验证，并已切换至受信任的公网IP HTTPS证书。独立域名、生产审批发布、线上回退和目标主机负载容量尚未验证。当前主机仅运行一套测试环境，不能据此认定能够同时承载开发、测试和生产环境。预算也未经过实际负载与租期费用核对。
 
 提醒/通知、运营统计、历史复用、动态权限、多级审批及维修评价等保持为产品文档中的后续阶段，本次未列为已完成功能。
 
@@ -64,4 +64,12 @@ CI首次启动的前端就绪等待调整为300秒，等待脚本支持显式超
 
 标准输入修复及新增[远程安装回归](../tests/test_remote_install.py)4项已提交为 `8807b5a`，覆盖完整安装记录、后台启动的标准输入隔离、首次安装及失败时保留旧记录。2026-10-15本地Python检查发现45项，其中29项实际通过，16项依赖外部环境而跳过；4项新增回归包含在29项通过中。这里按日期记录实际结果，不与2026-10-10的107项历史结果相加，也不将跳过项计为通过。
 
-`AUTO_DEPLOY_TEST` 仓库变量已启用，测试environment的发布分支限定为main，SSH Secrets及公开入口变量已配置。每次自动发布的触发提交、verify/deploy-test结论与部署HTTP冒烟结果，见[GitHub Actions实际运行记录](https://github.com/NICERTYU/campus-resource-platform/actions/workflows/ci.yml)。域名及HTTPS、生产审批发布、线上回退与负载容量仍不在本次已验证范围。
+`AUTO_DEPLOY_TEST` 仓库变量已启用，测试environment的发布分支限定为main，SSH Secrets及公开入口变量已配置。每次自动发布的触发提交、verify/deploy-test结论与部署冒烟结果，见[GitHub Actions实际运行记录](https://github.com/NICERTYU/campus-resource-platform/actions/workflows/ci.yml)。独立域名、生产审批发布、线上回退与负载容量仍不在本次已验证范围。
+
+## 2026-10-15 HTTPS与登录兼容修复
+
+登录报错源于前端直接调用 `crypto.randomUUID`，公网HTTP页面不提供该方法，导致登录POST发出前抛出TypeError；原接口脚本正常登录不能替代浏览器验收。新增能力缺失的API回归在原代码上实际失败，修复后通过；请求编号改为在需要时使用安全随机字节生成UUID，并保留失败重试幂等键。生产构建隐藏演示账号和固定密码，避免误导使用云端随机口令的用户。
+
+新增真实浏览器回归覆盖缺少UUID方法时的登录、退出和错误口令反馈。前端36项测试、类型检查、生产构建及格式验证通过；Python检查52项中36项实际通过、16项外部环境用例在本地跳过，后者由CI显式运行。
+
+云端已配置宿主机Nginx HTTPS入口，使用Let's Encrypt正式IP证书，公网证书信任校验返回成功、首页200，HTTP入口308转至HTTPS。容器Web只绑定本机8080，登录Cookie启用Secure；证书和私钥独立于应用发布目录。新增7项HTTPS配置与续期hook测试通过，并用真实Nginx完成配置解析验证。证书续期定时器每六小时检查，成功续期后验证配置并重载入口；部署检查URL改用HTTPS。

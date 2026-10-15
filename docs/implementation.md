@@ -1,6 +1,6 @@
 # 实现与验证记录
 
-日期：2026-10-10；实现提交：`d71ab27`。本次完成产品设计的首版MVP，采用用户确认的[业务规则](acceptance.md)，完整运行命令见[运行与部署](deployment.md)。
+初版记录日期：2026-10-10；初版实现提交：`d71ab27`。云测试部署记录更新于2026-10-15。本次完成产品设计的首版MVP，采用用户确认的[业务规则](acceptance.md)，完整运行命令见[运行与部署](deployment.md)。
 
 ## 已实现
 
@@ -10,9 +10,9 @@
 
 工程包含Maven Wrapper、锁定依赖、Flyway新建/升级迁移、显式幂等演示初始化、四容器Compose、Nginx入口隔离、GitHub Actions验收与制品发布、部署及回退脚本。CI与部署镜像按Git提交关联；生产通过受保护environment审批。
 
-## 自动验证结果
+## 2026-10-10自动验证结果（历史记录）
 
-以下均实际运行通过，合计107项，不包含跳过的用例。
+以下为2026-10-10实际运行通过的历史结果，合计107项，不包含跳过的用例。后续日期的增量检查另行记录，不将本表直接作为当前版本的新验证总数。
 
 | 验证 | 通过数 | 证据与覆盖 |
 | --- | ---: | --- |
@@ -42,9 +42,9 @@ Python全量验收通过时启用了 `CAMPUS_BASE_URL`、`CAMPUS_NETWORK_TEST=1`
 - 通过独立进程树实测，开发脚本收到SIGTERM/SIGINT后清理npm/Vite及两个后端，无应用进程残留；Nginx健康检查使用显式IPv4地址，避免localhost解析导致误报。
 - 桌面1440px和手机380px页面经过截图检查，无横向溢出。
 
-## 尚未实际执行的环境事项
+## 环境接入与待验证事项（2026-10-15更新）
 
-公开仓库已配置为 [NICERTYU/campus-resource-platform](https://github.com/NICERTYU/campus-resource-platform)，CI运行状态见[GitHub Actions工作流记录](https://github.com/NICERTYU/campus-resource-platform/actions/workflows/ci.yml)。华为云主机、SSH、域名及部署Secrets尚未配置，云端自动部署、HTTPS、生产审批及线上回退尚未实际运行。流水线和脚本已实现，仍须按部署文档接入目标环境验收。服务器配额和预算也未经过目标主机负载验证。
+公开仓库已配置为 [NICERTYU/campus-resource-platform](https://github.com/NICERTYU/campus-resource-platform)，CI及自动部署结果见[GitHub Actions工作流记录](https://github.com/NICERTYU/campus-resource-platform/actions/workflows/ci.yml)。云测试主机、SSH及测试部署配置已接入，一套测试环境已通过公开HTTP验证。域名及HTTPS、生产审批发布、线上回退和目标主机负载容量尚未验证。当前主机仅运行一套测试环境，不能据此认定能够同时承载开发、测试和生产环境。预算也未经过实际负载与租期费用核对。
 
 提醒/通知、运营统计、历史复用、动态权限、多级审批及维修评价等保持为产品文档中的后续阶段，本次未列为已完成功能。
 
@@ -53,3 +53,15 @@ Python全量验收通过时启用了 `CAMPUS_BASE_URL`、`CAMPUS_NETWORK_TEST=1`
 删除简历和代理工具等无关文件，公开分支从不含这些文件的实现历史建立；本地原有历史单独保留，不推送。新增5项仓库范围检查，防止个人文件、运行数据和非示例环境配置进入Git索引。
 
 CI首次启动的前端就绪等待调整为300秒，等待脚本支持显式超时并限制每次HTTP请求耗时；新增6项真实HTTP回归测试。新增11项测试及既有文档/部署检查均通过；后端41项、前端33项及生产构建也已在干净发布工作区重新验证。实际GitHub CI结果以工作流记录为准，不将需要外部环境而跳过的本地用例计为通过。
+
+## 2026-10-15云测试部署与回归记录
+
+云主机为Ubuntu24.04 x86_64，具有1.6GiB内存及2GiB swap，Docker版本29.1.3、Compose版本2.40.3。当前仅部署一套测试环境，Web、资源应用、流程应用和PostgreSQL四个服务均为healthy，公开HTTP入口可达。
+
+六个预置账号已分别改用不同的随机强口令，旧演示口令登录被拒绝。实际云端HTTP流程已通过：预约与取消；申请审批后阻止个人预约、撤销后恢复；报修派单及开工后限制教室、完工后继续限制、验收后解除对应来源；公共入口的内部接口返回404。
+
+远程安装脚本已通过真实SSH的 `bash -s` 重跑。Compose的 `exec` 使用 `--interactive=false`，`up` 隔离标准输入，避免后续安装语句被子进程读取。两个应用健康检查均实际执行，current部署记录写入 `af35206`；资源和流程共4条迁移记录全部为 `success=t`，记录文件已保存，四容器仍为healthy。
+
+标准输入修复及新增[远程安装回归](../tests/test_remote_install.py)4项已提交为 `8807b5a`，覆盖完整安装记录、后台启动的标准输入隔离、首次安装及失败时保留旧记录。2026-10-15本地Python检查发现45项，其中29项实际通过，16项依赖外部环境而跳过；4项新增回归包含在29项通过中。这里按日期记录实际结果，不与2026-10-10的107项历史结果相加，也不将跳过项计为通过。
+
+`AUTO_DEPLOY_TEST` 仓库变量已启用，测试environment的发布分支限定为main，SSH Secrets及公开入口变量已配置。每次自动发布的触发提交、verify/deploy-test结论与部署HTTP冒烟结果，见[GitHub Actions实际运行记录](https://github.com/NICERTYU/campus-resource-platform/actions/workflows/ci.yml)。域名及HTTPS、生产审批发布、线上回退与负载容量仍不在本次已验证范围。

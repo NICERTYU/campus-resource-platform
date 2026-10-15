@@ -12,7 +12,7 @@
 
 脚本生成 `.local/dev.env` 随机凭据，启动 `campus-dev` 数据库（仅本机54329）、构建后端、显式初始化样例数据、启动8081/8082后端及5173前端。按Ctrl+C停止应用；数据库与数据卷保留，再次运行不覆盖已修改账号/教室。日志在 `.local/resource.log`、`.local/workflow.log`。确认数据库数据无需保留后才使用 `docker compose ... down -v`。
 
-学生 `student`、`student2`，艺术学院学生 `outsider`，申请人 `applicant`，管理员 `admin`，维修员 `technician`。演示密码 `Campus123!`。学生/申请人属于CS；教室为公共图书馆、CS专属、ART专属各24座。演示初始化设置当天签到码246810，跨天需管理员重新设置。账户仅由显式初始化建立；普通启动不会造数据或重置状态。
+学生 `student`、`student2`，艺术学院学生 `outsider`，申请人 `applicant`，管理员 `admin`，维修员 `technician`。演示密码 `Campus123!`。学生/申请人属于CS；教室为公共图书馆、CS专属、ART专属各24座。演示初始化设置当天签到码246810，跨天需管理员重新设置。账户仅由显式初始化建立；普通启动不会造数据或重置状态。以上固定口令仅用于本地演示；云测试环境的六个预置账号已改用独立随机强口令。
 
 ## 自动验证
 
@@ -49,9 +49,19 @@ docker compose --env-file .local/test.env -p campus-test -f deploy/compose.yml u
 
 生产另用 `.local/prod.env`、`campus-prod` 项目与不同Web端口，设置 `COOKIE_SECURE=true`，在外层Nginx配置HTTPS、域名和受控路由。业务数据库与两个内部应用没有宿主机端口映射；仅Web入口对外。内部 `/internal/` 及actuator路径不经公共入口暴露。初始数据库脚本为资源/流程建立各自owner及schema并撤销互访，业务操作不使用超级用户。
 
-每项目独立数据库卷、网络与随机凭据。应用内存上限640MiB/个、数据库768MiB、Web128MiB为起始配额，单环境约2.1GiB上限；还须给操作系统留余量。是否能同时常驻测试与生产须结合实际华为云配置及负载验证，1200元预算没有被当作已验证报价。
+每项目独立数据库卷、网络与随机凭据。应用内存上限640MiB/个、数据库768MiB、Web128MiB为起始配额，单环境约2.1GiB上限；还须给操作系统留余量。这些配置上限不代表已经验证的负载容量。本次云主机仅运行一套测试环境；同时常驻测试与生产仍须另行评估和实测，1200元预算没有被当作已验证报价。
 
 `scripts/deploy.sh ENV_FILE campus-test COMMIT` 可在干净、指定提交的Linux工作目录构建并部署。`scripts/seed.sh` 是显式演示初始化，不属于每次发布的动作。首次生产账户及签到码由运营者准备；云主机、SSH、HTTPS等配置不保存于Git。
+
+## 2026-10-15云测试部署记录
+
+已在Ubuntu24.04 x86_64主机完成一套测试环境部署，主机具有1.6GiB内存及2GiB swap，运行Docker29.1.3与Compose2.40.3。Web、资源应用、流程应用及PostgreSQL四个服务均为healthy，公开HTTP入口可达。六个预置账号已分别设置不同的随机强口令，旧演示口令登录已验证被拒绝。
+
+真实云端HTTP验证已通过：个人预约及取消；整室申请审批后阻止个人预约，撤销后恢复；报修派单、进入维修后建立限制，提交完工仍保留限制，验收后解除对应来源；公共入口访问内部接口返回404。
+
+修正后的远程安装脚本已经通过真实SSH的 `bash -s` 模式重跑：两个应用的健康检查均实际执行，部署current记录写入 `af35206`，资源和流程共4条迁移记录均为 `success=t`，迁移记录文件已保存，四个容器仍为healthy。
+
+此主机当前仅承载一套测试环境。域名及HTTPS、生产审批发布、线上回退和实际负载容量尚未验证，现有启动与业务冒烟结果不构成这些项目的验收结论。
 
 ## CI与发布
 
@@ -59,7 +69,11 @@ docker compose --env-file .local/test.env -p campus-test -f deploy/compose.yml u
 
 CI首次启动双应用时最多等待前端入口300秒，覆盖镜像下载、构建和初始化。`scripts/wait-health.sh HTTP_URL [TIMEOUT_SECONDS]` 默认等待60秒，超时参数为1–86400的正整数；每次连接及请求最多5秒，并限制在剩余等待时间内。就绪退出0，超时退出1，参数错误退出2。
 
-测试自动部署：在GitHub配置 `AUTO_DEPLOY_TEST=true`；创建 `campus-test` environment，设置 `SSH_HOST, SSH_USER, SSH_PORT, SSH_KEY, SSH_KNOWN_HOSTS, DEPLOY_ROOT, DEPLOY_ENV_FILE` Secrets。`SMOKE_URL` 是环境公开入口URL变量。SSH known_hosts需运维预先核对，执行器及成员的SSH来源须加入云安全组。服务器需Docker Compose、Python3、flock，实际部署文件路径必须为绝对路径，凭据文件留在服务器。
+测试自动部署：`AUTO_DEPLOY_TEST=true` 必须配置为GitHub仓库变量或组织变量，不能仅配置在environment中；`deploy-test` 的job-level `if` 在进入environment前求值，读取不到仅在该environment定义的变量。创建 `campus-test` environment，在其中设置 `SSH_HOST, SSH_USER, SSH_PORT, SSH_KEY, SSH_KNOWN_HOSTS, DEPLOY_ROOT, DEPLOY_ENV_FILE` Secrets，并将 `SMOKE_URL` 配置为该environment的变量，供HTTP冒烟步骤读取。SSH known_hosts需运维预先核对，执行器及成员的SSH来源须加入云安全组。服务器需Docker Compose、Python3、flock，实际部署文件路径必须为绝对路径，凭据文件留在服务器。本次测试主机和SSH部署配置已接入，`AUTO_DEPLOY_TEST` 仓库变量已启用，测试environment的发布分支限定为main。
+
+远程脚本通过SSH的 `bash -s` 从标准输入执行。Compose的 `exec` 即使使用 `-T` 也可能读取标准输入，必须同时指定 `--interactive=false`；后台 `up` 使用 `</dev/null` 隔离标准输入，防止吞掉后续健康检查和版本记录语句。[远程安装回归测试](../tests/test_remote_install.py)新增4项检查，覆盖完整安装记录、`up` 不能消耗脚本输入、首次安装记录及失败时保持既有版本记录；标准输入修复及4项回归已提交为 `8807b5a`；这些本地回归已通过，真实SSH重跑结果见上节。
+
+每次自动发布的触发提交、verify和deploy-test结论、部署HTTP冒烟结果，均以[GitHub Actions实际运行记录](https://github.com/NICERTYU/campus-resource-platform/actions/workflows/ci.yml)为准。
 
 发布只安装CI验证的镜像，不在服务器重新编译。测试任务串行，并在执行前核对main最新提交，避免旧流水线覆盖新版本。全组3个镜像一次更新，迁移自动执行；应用健康检查、Flyway历史与提交记录随发布保存。`/actuator/info` 在容器内部提供commit信息。
 
@@ -79,4 +93,4 @@ docker compose --env-file .local/prod.env -p campus-prod -f deploy/compose.yml e
 ./scripts/rollback.sh /srv/campus /srv/campus/secrets/prod.env campus-prod PREVIOUS_COMMIT
 ```
 
-回退只切换应用，不逆向执行Flyway迁移；破坏性schema修改必须先备份并另行恢复数据库，不能承诺换旧镜像就恢复数据。实际华为云部署、GitHubSecret配置、生产审批与回退演示尚须由有访问权限的团队在目标环境完成。
+回退只切换应用，不逆向执行Flyway迁移；破坏性schema修改必须先备份并另行恢复数据库，不能承诺换旧镜像就恢复数据。云测试部署和SSH安装已实际完成；生产审批发布及线上回退演示尚须在相应目标环境实际完成。

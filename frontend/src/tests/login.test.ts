@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { createRouter, createMemoryHistory } from 'vue-router'
@@ -12,7 +12,9 @@ vi.mock('../lib/api', async () => {
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  vi.stubEnv('DEV', true)
 })
+afterEach(() => vi.unstubAllEnvs())
 async function form() {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -30,7 +32,7 @@ describe('login form validation and feedback', () => {
     expect(write).not.toHaveBeenCalled()
     wrapper.unmount()
   })
-  it('offers role accounts and surfaces server errors with request ids', async () => {
+  it('offers role accounts in development and surfaces server errors with request ids', async () => {
     vi.mocked(write).mockRejectedValue(
       new ApiError(401, 'LOGIN_FAILED', '账号或密码错误', 'req-login'),
     )
@@ -39,9 +41,33 @@ describe('login form validation and feedback', () => {
     expect((wrapper.find('[autocomplete="username"]').element as HTMLInputElement).value).toBe(
       'student',
     )
+    expect(
+      (wrapper.find('[autocomplete="current-password"]').element as HTMLInputElement).value,
+    ).toBe('Campus123!')
     await wrapper.find('form').trigger('submit')
     await flushPromises()
     expect(wrapper.text()).toContain('账号或密码错误（请求编号 req-login）')
+    wrapper.unmount()
+  })
+  it('hides demo accounts in production and submits only manually entered credentials', async () => {
+    vi.stubEnv('DEV', false)
+    vi.mocked(write).mockRejectedValue(new ApiError(401, 'LOGIN_FAILED', '账号或密码错误'))
+    const wrapper = await form()
+    expect(wrapper.find('.demo-accounts').exists()).toBe(false)
+    expect(wrapper.findAll('.account-chips button')).toHaveLength(0)
+    expect(wrapper.text()).not.toContain('Campus123!')
+    const username = wrapper.find('[autocomplete="username"]')
+    const password = wrapper.find('[autocomplete="current-password"]')
+    expect((username.element as HTMLInputElement).value).toBe('')
+    expect((password.element as HTMLInputElement).value).toBe('')
+    await username.setValue('admin')
+    await password.setValue('manually-entered-test-password')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    expect(write).toHaveBeenCalledWith('/auth/login', {
+      username: 'admin',
+      password: 'manually-entered-test-password',
+    })
     wrapper.unmount()
   })
 })

@@ -7,6 +7,20 @@ const response = (body: unknown, status = 200) => ({
 })
 afterEach(() => vi.unstubAllGlobals())
 describe('same-origin authenticated API', () => {
+  it('submits login on HTTP where crypto.randomUUID is unavailable', async () => {
+    vi.stubGlobal('crypto', {
+      getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto),
+    })
+    const fetch = vi.fn().mockResolvedValue(response({ id: 1, username: 'admin' }))
+    vi.stubGlobal('fetch', fetch)
+    await expect(
+      write('/auth/login', { username: 'admin', password: 'test-only-password' }),
+    ).resolves.toMatchObject({ username: 'admin' })
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetch.mock.calls[0][1].headers['Idempotency-Key']).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    )
+  })
   it('reads CSRF and includes session credentials and request key on writes', async () => {
     const fetch = vi
       .fn()
@@ -24,7 +38,11 @@ describe('same-origin authenticated API', () => {
     })
     expect(fetch.mock.calls[1][1].headers['Idempotency-Key']).toBeTruthy()
   })
-  it('preserves an idempotency key when retrying an ambiguous network failure', async () => {
+  it.each([true, false])('preserves a retry key with native UUID available: %s', async (native) => {
+    if (!native)
+      vi.stubGlobal('crypto', {
+        getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto),
+      })
     const fetch = vi
       .fn()
       .mockRejectedValueOnce(new TypeError('network unavailable'))

@@ -9,6 +9,7 @@ const auth = useAuth(),
   password = ref(''),
   loading = ref(false),
   error = ref('')
+const showDemoAccounts = import.meta.env.DEV
 const accounts = [
   { name: 'student', label: '学生' },
   { name: 'student2', label: '学生二' },
@@ -18,6 +19,7 @@ const accounts = [
   { name: 'technician', label: '维修人员' },
 ]
 function choose(name: string) {
+  if (!showDemoAccounts) return
   username.value = name
   password.value = 'Campus123!'
   error.value = ''
@@ -96,7 +98,7 @@ async function login() {
             >登录平台 <span>↗</span></el-button
           ></el-form
         >
-        <div class="demo-accounts">
+        <div v-if="showDemoAccounts" class="demo-accounts">
           <strong>演示账号</strong>
           <p>选择角色即可填入预置账号。密码为 Campus123!</p>
           <div class="account-chips">

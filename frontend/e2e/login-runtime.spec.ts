@@ -49,7 +49,7 @@ test('缺少 randomUUID 时可以登录、退出并显示错误口令的业务�
     loginButton.click(),
   ])
   expect(failedResponse.status()).toBe(401)
-  await expect(page.locator('.form-error')).toContainText('账号或密码错误')
+  await expect(page.locator('.form-error')).toContainText('用户名或密码错误')
   await expect(page.locator('.form-error')).not.toContainText('连接服务失败')
   await expect(page).toHaveURL(loginUrl.toString())
 })

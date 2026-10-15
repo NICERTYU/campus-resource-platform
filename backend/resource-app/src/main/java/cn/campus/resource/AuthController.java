@@ -44,6 +44,12 @@ class AuthController {
       HttpServletResponse response) {
     if (credentials.username() == null || credentials.password() == null)
       throw ApiError.bad("请输入用户名及密码");
+    return sessions.withAccountLock(
+        credentials.username(), () -> authenticate(credentials, request, response));
+  }
+
+  private Models.User authenticate(
+      Credentials credentials, HttpServletRequest request, HttpServletResponse response) {
     try {
       Authentication authenticated =
           auth.authenticate(

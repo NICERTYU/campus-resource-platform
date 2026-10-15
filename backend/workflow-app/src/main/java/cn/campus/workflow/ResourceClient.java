@@ -46,7 +46,8 @@ class ResourceClient {
   }
 
   List<User> users(String requestId) {
-    return Arrays.asList(send("GET", "/internal/v1/users", null, requestId, User[].class));
+    return Arrays.asList(
+        send("GET", "/internal/v1/users?role=TECHNICIAN", null, requestId, User[].class));
   }
 
   RestrictionAck restriction(Intent intent) {

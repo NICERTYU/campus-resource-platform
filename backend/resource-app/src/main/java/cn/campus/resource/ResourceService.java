@@ -54,7 +54,8 @@ class ResourceService {
 
   Map<String, Object> loginUser(String username) {
     var rows =
-        db.queryForList("SELECT id,password_hash,enabled FROM users WHERE username=?", username);
+        db.queryForList(
+            "SELECT id,password_hash,enabled FROM users WHERE lower(username)=lower(?)", username);
     if (rows.isEmpty()) throw new UsernameNotFoundException("Unknown user");
     return rows.getFirst();
   }
@@ -83,11 +84,31 @@ class ResourceService {
   }
 
   List<User> users(User actor) {
+    return users(actor, null);
+  }
+
+  List<User> users(User actor, String role) {
     require(actor, "ADMIN");
-    return allUsers();
+    return allUsers(role);
   }
 
   List<User> allUsers() {
+    return allUsers(null);
+  }
+
+  List<User> allUsers(String role) {
+    if (role != null && !Set.of("STUDENT", "APPLICANT", "ADMIN", "TECHNICIAN").contains(role))
+      throw ApiError.bad("角色不正确");
+    if (role != null)
+      return db
+          .queryForList(
+              "SELECT u.id FROM users u WHERE u.enabled AND EXISTS"
+                  + " (SELECT 1 FROM user_roles r WHERE r.user_id=u.id AND r.role=?) ORDER BY u.id",
+              Long.class,
+              role)
+          .stream()
+          .map(this::user)
+          .toList();
     return db
         .queryForList("SELECT id FROM users WHERE enabled ORDER BY id LIMIT 200", Long.class)
         .stream()

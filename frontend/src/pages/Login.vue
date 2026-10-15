@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '../stores/auth'
 import { errorMessage } from '../lib/api'
 const auth = useAuth(),
   router = useRouter(),
-  username = ref(''),
+  route = useRoute(),
+  username = ref(typeof route.query.username === 'string' ? route.query.username : ''),
   password = ref(''),
   loading = ref(false),
   error = ref('')
@@ -25,6 +26,7 @@ function choose(name: string) {
   error.value = ''
 }
 async function login() {
+  if (loading.value) return
   error.value = ''
   if (!username.value.trim() || !password.value) {
     error.value = '请填写账号和密码'
@@ -68,6 +70,22 @@ async function login() {
         <h2>欢迎回来</h2>
         <p class="muted">登录校园账号，开启今天的学习计划。</p>
         <el-alert
+          v-if="route.query.registered === '1'"
+          title="注册成功，请使用新账号登录"
+          type="success"
+          :closable="false"
+          show-icon
+          class="form-error"
+        />
+        <el-alert
+          v-if="route.query.passwordReset === '1'"
+          title="密码已更新，请使用新密码重新登录"
+          type="success"
+          :closable="false"
+          show-icon
+          class="form-error"
+        />
+        <el-alert
           v-if="error"
           :title="error"
           type="error"
@@ -98,6 +116,9 @@ async function login() {
             >登录平台 <span>↗</span></el-button
           ></el-form
         >
+        <p class="auth-switch">
+          还没有账号？<router-link to="/register">注册学生账号</router-link>
+        </p>
         <div v-if="showDemoAccounts" class="demo-accounts">
           <strong>演示账号</strong>
           <p>选择角色即可填入预置账号。密码为 Campus123!</p>

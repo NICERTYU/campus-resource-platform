@@ -80,8 +80,8 @@ class ResourceController {
   }
 
   @GetMapping("/admin/users")
-  Object users(Authentication auth) {
-    return service.users(actor(auth));
+  Object users(Authentication auth, @RequestParam(required = false) String role) {
+    return service.users(actor(auth), role);
   }
 
   @GetMapping("/admin/classrooms")

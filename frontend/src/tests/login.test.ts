@@ -15,16 +15,28 @@ beforeEach(() => {
   vi.stubEnv('DEV', true)
 })
 afterEach(() => vi.unstubAllEnvs())
-async function form() {
+async function form(path = '/login') {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: '/login', component: Login }],
   })
-  await router.push('/login')
+  await router.push(path)
   await router.isReady()
   return mount(Login, { global: { plugins: [router, ElementPlus] } })
 }
 describe('login form validation and feedback', () => {
+  it('shows registration and pre-fills only the username after account creation', async () => {
+    const wrapper = await form('/login?registered=1&username=new_student')
+    expect(wrapper.text()).toContain('注册成功，请使用新账号登录')
+    expect(wrapper.find('a[href="/register"]').text()).toBe('注册学生账号')
+    expect((wrapper.find('[autocomplete="username"]').element as HTMLInputElement).value).toBe(
+      'new_student',
+    )
+    expect(
+      (wrapper.find('[autocomplete="current-password"]').element as HTMLInputElement).value,
+    ).toBe('')
+    wrapper.unmount()
+  })
   it('requires both credentials before sending a login request', async () => {
     const wrapper = await form()
     await wrapper.find('form').trigger('submit')

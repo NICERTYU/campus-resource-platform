@@ -39,9 +39,9 @@ class InternalController {
   }
 
   @GetMapping("/users")
-  List<User> users(HttpServletRequest request) {
+  List<User> users(HttpServletRequest request, @RequestParam(required = false) String role) {
     verify(request);
-    return service.allUsers();
+    return service.allUsers(role);
   }
 
   @PutMapping("/restrictions/{type}/{id}")

@@ -90,6 +90,12 @@ h3 {
   display: flex;
   flex-direction: column;
   z-index: 20;
+  overflow: hidden;
+}
+.sidebar > .brand,
+.sidebar > .nav-caption,
+.sidebar > .user-profile {
+  flex-shrink: 0;
 }
 .brand {
   display: flex;
@@ -128,6 +134,9 @@ h3 {
   display: flex;
   flex-direction: column;
   gap: 9px;
+  min-height: 0;
+  overflow-y: auto;
+  flex-shrink: 1;
 }
 .sidebar nav a {
   display: flex;
@@ -142,7 +151,7 @@ h3 {
 .sidebar nav a:hover {
   background: #214b4d;
 }
-.sidebar nav a.router-link-active {
+.sidebar nav a.nav-active {
   background: #d1dfc9;
   color: #274a40;
 }
@@ -152,7 +161,7 @@ h3 {
   color: #91aca5;
   margin-top: 5px;
 }
-.sidebar nav a.router-link-active small {
+.sidebar nav a.nav-active small {
   color: #6e8c7c;
 }
 .nav-icon {
@@ -164,6 +173,7 @@ h3 {
 .sidebar-note {
   margin-top: auto;
   padding: 42px 12px 31px;
+  flex-shrink: 0;
 }
 .note-line {
   display: block;
@@ -208,6 +218,7 @@ h3 {
   font-size: 9px;
   color: #a2bcb3;
   margin-top: 4px;
+  line-height: 1.5;
 }
 .user-profile button {
   margin-left: auto;
@@ -868,6 +879,64 @@ h3 {
 }
 .login-form .el-form-item {
   margin-bottom: 24px;
+}
+.auth-switch {
+  margin-top: 24px;
+  font-size: 13px;
+  color: #7b8b8a;
+  text-align: center;
+}
+.auth-switch a {
+  color: #315f4d;
+  font-weight: 600;
+  margin-left: 8px;
+}
+.registration-form .el-form-item {
+  margin-bottom: 17px;
+}
+.native-select {
+  width: 100%;
+  height: 40px;
+  border: 1px solid #dce3d7;
+  border-radius: 6px;
+  padding: 0 12px;
+  background: white;
+  color: #314d47;
+  font: inherit;
+}
+.account-search {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 22px;
+}
+.account-search .el-input {
+  width: min(100%, 340px);
+}
+.account-target {
+  padding: 14px 16px;
+  background: #f2f6ee;
+  border-radius: 7px;
+  margin-bottom: 20px;
+  line-height: 1.8;
+}
+.account-role-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 18px;
+}
+.account-role-group .el-checkbox {
+  margin-right: 0;
+}
+@media (max-height: 800px) {
+  .sidebar-note {
+    padding-top: 18px;
+    padding-bottom: 18px;
+  }
+  .sidebar-note .note-line,
+  .sidebar-note p {
+    display: none;
+  }
 }
 .login-submit {
   width: 100%;

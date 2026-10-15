@@ -3,7 +3,9 @@ package cn.campus.resource;
 import jakarta.servlet.http.*;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
 import org.springframework.security.web.csrf.CsrfToken;
@@ -12,6 +14,15 @@ import org.springframework.stereotype.Component;
 @Component
 class Sessions implements HttpSessionListener {
   private final ConcurrentHashMap<String, HttpSession> sessions = new ConcurrentHashMap<>();
+  private final Object[] accountLocks =
+      java.util.stream.IntStream.range(0, 64).mapToObj(i -> new Object()).toArray();
+
+  <T> T withAccountLock(String username, Supplier<T> operation) {
+    int index = Math.floorMod(username.toLowerCase(Locale.ROOT).hashCode(), accountLocks.length);
+    synchronized (accountLocks[index]) {
+      return operation.get();
+    }
+  }
 
   void register(HttpSession session) {
     sessions.put(session.getId(), session);
@@ -19,6 +30,26 @@ class Sessions implements HttpSessionListener {
 
   void remove(String id) {
     sessions.remove(id);
+  }
+
+  void invalidate(String username) {
+    sessions.forEach(
+        (id, session) -> {
+          try {
+            SecurityContext context =
+                (SecurityContext)
+                    session.getAttribute(
+                        HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY);
+            if (context != null
+                && context.getAuthentication() != null
+                && username.equalsIgnoreCase(context.getAuthentication().getName())) {
+              sessions.remove(id, session);
+              session.invalidate();
+            }
+          } catch (IllegalStateException expired) {
+            sessions.remove(id, session);
+          }
+        });
   }
 
   @Override

@@ -47,6 +47,10 @@ export const reasonLabel: Record<string, string> = {
   MAINTENANCE: '教室维修取消（不计违约）',
 }
 export const actionLabel: Record<string, string> = {
+  'account.register': '注册学生账号',
+  'account.create': '创建校园账号',
+  'account.update': '更新账号与权限',
+  'account.password': '重置账号密码',
   RESERVATION_CREATED: '创建座位预约',
   RESERVATION_CANCELLED: '取消座位预约',
   RESERVATION_CHECKED_IN: '到场签到',

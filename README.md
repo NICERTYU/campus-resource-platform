@@ -4,6 +4,8 @@
 
 Vue3 + Spring Boot双应用 + PostgreSQL的校园预约与报修MVP。产品与技术约定见[文档索引](docs/README.md)。
 
+登录页支持学生自助注册；管理员可在“账号管理”创建账号、分配角色、启停和重置密码，使用说明见[注册与账号使用](docs/deployment.md#注册与账号使用)。
+
 本地需Java21、Node24 LTS、Docker及Python3；运行：
 
 ```bash

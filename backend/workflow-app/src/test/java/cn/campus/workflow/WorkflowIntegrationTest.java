@@ -44,6 +44,7 @@ class WorkflowIntegrationTest {
   static final AtomicInteger LOSE_RESPONSES = new AtomicInteger();
   static final AtomicReference<String> LAST_IDENTITY_COOKIE = new AtomicReference<>();
   static final AtomicReference<JsonNode> LAST_IDENTITY_PAYLOAD = new AtomicReference<>();
+  static final AtomicReference<String> LAST_USERS_QUERY = new AtomicReference<>();
   static final Map<String, JsonNode> RESTRICTIONS = new ConcurrentHashMap<>();
   static final HttpServer RESOURCE = startResource();
   @LocalServerPort int port;
@@ -81,6 +82,15 @@ class WorkflowIntegrationTest {
     RESTRICTIONS.clear();
     LAST_IDENTITY_COOKIE.set(null);
     LAST_IDENTITY_PAYLOAD.set(null);
+    LAST_USERS_QUERY.set(null);
+  }
+
+  @Test
+  void technicianLookupFiltersAtResourceServiceBeforeAnyGeneralUserLimit() {
+    var technicians = resourceClient.users("technician-filter");
+    assertEquals("role=TECHNICIAN", LAST_USERS_QUERY.get());
+    assertEquals(2, technicians.size());
+    assertTrue(technicians.stream().allMatch(user -> user.roles().contains("TECHNICIAN")));
   }
 
   @Test
@@ -808,8 +818,18 @@ class WorkflowIntegrationTest {
                 true,
                 "seatCount",
                 20));
-      } else if (path.endsWith("/users")) respond(exchange, 200, users().values());
-      else if (path.contains("/restrictions/")) {
+      } else if (path.endsWith("/users")) {
+        String query = exchange.getRequestURI().getQuery();
+        LAST_USERS_QUERY.set(query);
+        var records =
+            users().values().stream()
+                .filter(
+                    user ->
+                        !"role=TECHNICIAN".equals(query)
+                            || ((java.util.List<?>) user.get("roles")).contains("TECHNICIAN"))
+                .toList();
+        respond(exchange, 200, records);
+      } else if (path.contains("/restrictions/")) {
         COMMANDS.incrementAndGet();
         JsonNode command =
             JSON.readTree(

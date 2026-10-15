@@ -18,7 +18,10 @@ const navigation = computed(() => [
     : []),
   { path: '/repairs', label: '报修服务', icon: '⌁', detail: '让空间保持良好状态' },
   ...(auth.isAdmin
-    ? [{ path: '/admin', label: '空间与运营', icon: '⚙', detail: '基础数据与操作记录' }]
+    ? [
+        { path: '/admin', label: '空间与运营', icon: '⚙', detail: '基础数据与操作记录' },
+        { path: '/admin/accounts', label: '账号管理', icon: '♙', detail: '维护账号与访问权限' },
+      ]
     : []),
 ])
 function sessionExpired() {
@@ -39,7 +42,7 @@ async function logout() {
 }
 </script>
 <template>
-  <router-view v-if="route.path === '/login'" />
+  <router-view v-if="['/login', '/register'].includes(route.path)" />
   <div v-else class="app-shell">
     <aside class="sidebar" :class="{ open: menuOpen }">
       <router-link to="/seats" class="brand"
@@ -52,6 +55,7 @@ async function logout() {
           v-for="item in navigation"
           :key="item.path"
           :to="item.path"
+          :class="{ 'nav-active': route.path === item.path }"
           @click="menuOpen = false"
           ><span class="nav-icon">{{ item.icon }}</span>
           <div>

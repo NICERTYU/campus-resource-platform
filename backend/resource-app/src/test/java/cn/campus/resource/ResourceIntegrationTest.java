@@ -115,7 +115,7 @@ class ResourceIntegrationTest {
     assertEquals(6, db.queryForObject("SELECT count(*) FROM users", Integer.class));
     assertEquals(72, db.queryForObject("SELECT count(*) FROM seats", Integer.class));
     assertEquals(
-        2,
+        3,
         db.queryForObject(
             "SELECT count(*) FROM flyway_schema_history WHERE success AND version IS NOT NULL",
             Integer.class));
@@ -153,7 +153,7 @@ class ResourceIntegrationTest {
               "SELECT display_name FROM resource_upgrade.users WHERE username='retained'",
               String.class));
       assertEquals(
-          2,
+          3,
           db.queryForObject(
               "SELECT count(*) FROM resource_upgrade.flyway_schema_history WHERE success AND"
                   + " version IS NOT NULL",
@@ -164,6 +164,12 @@ class ResourceIntegrationTest {
               "SELECT count(*) FROM pg_indexes WHERE schemaname='resource_upgrade' AND"
                   + " indexname='reservations_due'",
               Integer.class));
+      assertThrows(
+          org.springframework.dao.DataIntegrityViolationException.class,
+          () ->
+              db.update(
+                  "INSERT INTO resource_upgrade.users(username,password_hash,display_name)"
+                      + " VALUES('RETAINED','hash','Conflicting case variant')"));
       latest.validate();
     } finally {
       db.execute("DROP SCHEMA IF EXISTS resource_upgrade CASCADE");

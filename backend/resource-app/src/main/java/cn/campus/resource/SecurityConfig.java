@@ -70,6 +70,7 @@ class SecurityConfig {
                 a.requestMatchers(
                         "/api/v1/auth/csrf",
                         "/api/v1/auth/login",
+                        "/api/v1/auth/register",
                         "/internal/**",
                         "/actuator/health",
                         "/actuator/info")

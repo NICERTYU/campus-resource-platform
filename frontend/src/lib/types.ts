@@ -6,6 +6,10 @@ export interface User {
   department: string
   roles: Role[]
 }
+export interface Account extends Omit<User, 'department'> {
+  department: string | null
+  enabled: boolean
+}
 export interface Classroom {
   id: number
   name: string

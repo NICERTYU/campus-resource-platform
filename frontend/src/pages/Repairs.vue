@@ -111,7 +111,7 @@ onMounted(async () => {
     rooms.value = await request<Classroom[]>('/classrooms')
     roomId.value = rooms.value[0]?.id
     if (auth.isAdmin)
-      technicians.value = (await request<User[]>('/admin/users')).filter((u) =>
+      technicians.value = (await request<User[]>('/admin/users?role=TECHNICIAN')).filter((u) =>
         u.roles.includes('TECHNICIAN'),
       )
   } catch (e) {

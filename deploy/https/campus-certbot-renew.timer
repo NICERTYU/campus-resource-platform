@@ -1,0 +1,11 @@
+[Unit]
+Description=Check campus HTTPS certificate renewal every six hours
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:00:00
+RandomizedDelaySec=10m
+Persistent=true
+Unit=campus-certbot-renew.service
+
+[Install]
+WantedBy=timers.target

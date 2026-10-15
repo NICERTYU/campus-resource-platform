@@ -1,0 +1,8 @@
+[Unit]
+Description=Renew campus HTTPS certificates
+Wants=network-online.target
+After=network-online.target nginx.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/certbot/bin/certbot renew --quiet --deploy-hook /usr/local/sbin/campus-reload-nginx

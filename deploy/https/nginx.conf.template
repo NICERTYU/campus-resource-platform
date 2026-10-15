@@ -1,0 +1,51 @@
+# Install the rendered file in /etc/nginx/sites-available/campus-https.
+# Substitute only PUBLIC_HOST and ACME_CERT_NAME, preserving Nginx variables:
+# envsubst '${PUBLIC_HOST} ${ACME_CERT_NAME}' < nginx.conf.template
+server {
+    listen 80 default_server;
+    server_name ${PUBLIC_HOST};
+    server_tokens off;
+
+    # HTTP is used only for ACME ownership validation and HTTPS redirection.
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/lib/letsencrypt;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    location / {
+        return 308 https://${PUBLIC_HOST}$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl default_server;
+    server_name ${PUBLIC_HOST};
+    server_tokens off;
+    client_max_body_size 1m;
+
+    ssl_certificate /etc/letsencrypt/live/${ACME_CERT_NAME}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${ACME_CERT_NAME}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:campus_tls:1m;
+    ssl_session_timeout 10m;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy same-origin always;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host ${PUBLIC_HOST};
+        proxy_set_header X-Forwarded-Host ${PUBLIC_HOST};
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Port 443;
+        # This is the public edge: never trust forwarded headers from clients.
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Request-Id $request_id;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 20s;
+    }
+}

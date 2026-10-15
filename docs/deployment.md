@@ -63,6 +63,31 @@ docker compose --env-file .local/test.env -p campus-test -f deploy/compose.yml u
 
 此主机当前仅承载一套测试环境。域名及HTTPS、生产审批发布、线上回退和实际负载容量尚未验证，现有启动与业务冒烟结果不构成这些项目的验收结论。
 
+## HTTPS入口与证书续期
+
+云端使用宿主机Nginx终止TLS，再代理到容器Web。服务器环境文件应设置 `WEB_BIND=127.0.0.1`、`WEB_PORT=8080`、`COOKIE_SECURE=true`，应用接口及数据库仍不直接映射公网。HTTP仅保留ACME验证目录，其余请求308跳转到固定HTTPS地址。GitHub环境的 `SMOKE_URL` 同时改为HTTPS入口。
+
+[Nginx模板](../deploy/https/nginx.conf.template)使用 `${PUBLIC_HOST}` 和 `${ACME_CERT_NAME}` 两个占位。只替换这两个变量，保留 `$request_uri` 等Nginx变量。证书私钥留在服务器，不进入仓库或发布制品。首次启用先使用仅监听80的ACME验证配置，签发后再启用包含443和证书路径的完整模板。
+
+Let’s Encrypt已支持公网IP证书，要求短期证书profile；使用Certbot5.4及以上版本的webroot功能，见[官方IP证书说明](https://letsencrypt.org/2026/03/11/shorter-certs-certbot/)。本次客户端固定为5.8.0，安装在服务器 `/opt/certbot` 虚拟环境。签发示例（替换为运营者控制的公网IP和证书名称）：
+
+```bash
+export PUBLIC_HOST=YOUR_PUBLIC_IP
+export ACME_CERT_NAME=campus-ip
+/opt/certbot/bin/certbot certonly --non-interactive --agree-tos \
+  --register-unsafely-without-email --preferred-profile shortlived \
+  --webroot --webroot-path /var/lib/letsencrypt \
+  --ip-address "$PUBLIC_HOST" --cert-name "$ACME_CERT_NAME"
+envsubst '${PUBLIC_HOST} ${ACME_CERT_NAME}' < deploy/https/nginx.conf.template \
+  > /etc/nginx/sites-available/campus
+nginx -t
+systemctl reload nginx
+```
+
+可用 `--email` 登记运营邮箱，替换不登记邮箱选项。IP证书有效期约六天，必须自动续期。将[重载hook](../deploy/https/reload-nginx.sh)安装为root所有的 `/usr/local/sbin/campus-reload-nginx`（0755），将[service](../deploy/https/campus-certbot-renew.service)及[timer](../deploy/https/campus-certbot-renew.timer)安装到 `/etc/systemd/system/`，启用 `campus-certbot-renew.timer`。定时器每六小时检查，成功续期后先验证Nginx配置再重载。用 `certbot renew --dry-run --run-deploy-hooks --no-random-sleep-on-renew` 验证续期链路；测试证书不替换现有正式证书。
+
+部署后验证证书信任和IP匹配、HTTP跳转、HTTPS登录及Secure Cookie、内部路径404和自动续期状态。生产构建隐藏演示账号和固定密码，使用实际配置的随机口令登录。前端请求编号支持缺少 `crypto.randomUUID` 的浏览器，并保留失败重试的幂等键；浏览器回归覆盖登录、退出及错误口令反馈。
+
 ## CI与发布
 
 [CI配置](../.github/workflows/ci.yml) 对提交/PR执行静态、业务、真实HTTP、浏览器验收，然后构建3个镜像，以Git commit命名，打包镜像及源码为制品。只有全部检查通过才可发布。

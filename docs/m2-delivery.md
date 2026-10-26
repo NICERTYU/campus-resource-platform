@@ -18,9 +18,10 @@
 
 - 资源应用42项JUnit通过；本次未修改资源应用业务代码。
 - 流程应用28项JUnit通过，无跳过，其中新增 [ApprovalPolicyTest](../backend/workflow-app/src/test/java/cn/campus/workflow/ApprovalPolicyTest.java)3项及 [MultilevelApprovalIntegrationTest](../backend/workflow-app/src/test/java/cn/campus/workflow/MultilevelApprovalIntegrationTest.java)11项。原有单级回归在显式单级配置下执行，新流程另以默认两级配置测试。
-- 前端53项Vitest通过。路由单元测试只替换重量级座位页面模块，继续验证真实权限守卫；实际座位页面由页面测试及真实浏览器覆盖，不放宽仓库测试时限。类型检查、生产构建与格式检查通过。生产构建使用仓库指定的Node24.21.0，本机旧24.13.0原生打包进程曾异常退出。
+- 前端53项Vitest通过。路由单元测试替换懒加载页面组件，继续验证真实权限守卫；实际页面由页面测试及真实浏览器覆盖，不放宽仓库测试时限。类型检查、生产构建与格式检查通过。生产构建使用仓库指定的Node24.21.0，本机旧24.13.0原生打包进程曾异常退出。
 - Python工程检查在Linux临时容器执行：36项通过，18项外部环境用例明确跳过。随后在实际本地双应用执行 [HTTP](../tests/test_system_http.py)12项、[数据库隔离](../tests/test_database_boundary.py)4项、[故障恢复](../tests/test_network_recovery.py)2项，均通过；共覆盖54个不同用例，分环境执行。
 - Chromium真实浏览器7条流程全部通过：原6条回归加上M2退回、补充重提、逐级审批和历史流程。首次本地执行遇到服务尚未就绪与Vite依赖预优化重载，待服务就绪及缓存稳定后全套重跑通过，不把失败尝试算作通过。
+- 首次PR CI的账号管理用例在冷启动下重复出现导航被依赖优化重载中断，另外6条浏览器流程通过。开发服务器增加懒加载页面预热，并忽略测试报告目录的文件监听；权限与页面断言保持原样。关闭已打开的页面请求、备份移走Vite缓存后，从空缓存启动，全套7条流程通过，期间开发日志未再出现依赖优化导致的整页重载。
 - [受控破坏脚本](../backend/workflow-app/scripts/mutation-probe.py)移除审核人白名单判断，权限测试按预期失败；源码在finally中完整恢复，并重跑测试通过。
 
 复现命令（已配置Java21、Node24.21.0及Docker）：

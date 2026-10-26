@@ -1,7 +1,13 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import router from '../router'
 import { useAuth } from '../stores/auth'
+
+// Test real route guards without loading page widgets; UI and browser tests cover the real pages.
+vi.mock('../pages/Seats.vue', () => ({ default: { render: () => null } }))
+vi.mock('../pages/Accounts.vue', () => ({ default: { render: () => null } }))
+vi.mock('../pages/Login.vue', () => ({ default: { render: () => null } }))
+vi.mock('../pages/Register.vue', () => ({ default: { render: () => null } }))
 
 beforeEach(() => {
   setActivePinia(createPinia())

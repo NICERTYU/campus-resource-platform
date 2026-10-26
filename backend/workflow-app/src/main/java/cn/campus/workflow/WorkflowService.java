@@ -25,6 +25,7 @@ class WorkflowService {
   private final TransactionTemplate tx;
   private final ObjectMapper json;
   private final Clock clock;
+  private final ApprovalPolicy approval;
 
   WorkflowService(
       WorkflowRepository repo,
@@ -32,13 +33,15 @@ class WorkflowService {
       OutboxProcessor outbox,
       TransactionTemplate tx,
       ObjectMapper json,
-      Clock clock) {
+      Clock clock,
+      ApprovalPolicy approval) {
     this.repo = repo;
     this.resource = resource;
     this.outbox = outbox;
     this.tx = tx;
     this.json = json;
     this.clock = clock;
+    this.approval = approval;
   }
 
   List<ApplicationView> applications(User user) {
@@ -79,7 +82,8 @@ class WorkflowService {
                   .queryForObject(
                       """
                       INSERT INTO classroom_applications(classroom_id,classroom_name,applicant_id,applicant_name,
-                        start_time,end_time,purpose,status) VALUES(?,?,?,?,?,?,?,'PENDING') RETURNING id
+                        start_time,end_time,purpose,status,total_steps,applicant_department,approval_deadline)
+                        VALUES(?,?,?,?,?,?,?,'PENDING',?,?,?) RETURNING id
                       """,
                       Long.class,
                       room.id(),
@@ -88,14 +92,18 @@ class WorkflowService {
                       user.displayName(),
                       input.startTime(),
                       input.endTime(),
-                      purpose);
+                      purpose,
+                      approval.steps,
+                      user.department(),
+                      approval.deadline(OffsetDateTime.now(clock), input.startTime()));
           repo.audit(user, "M2", id, "CREATE", requestId);
+          repo.history(id, 1, 0, "CREATE", user, null, requestId, OffsetDateTime.now(clock));
           return new Mutation("M2", id, null);
         });
   }
 
   Result applicationAction(
-      User user, long id, String action, String key, CommentInput input, String requestId) {
+      User user, long id, String action, String key, ReviewInput input, String requestId) {
     if (!action.equals("withdraw")) Rules.admin(user);
     Result replay = replay(user, "M2:" + id + ":" + action, key, input == null ? Map.of() : input);
     if (replay != null) return replay;
@@ -113,10 +121,21 @@ class WorkflowService {
           if (action.equals("withdraw")
               && !user.has("ADMIN")
               && number(row, "applicant_id") != user.id()) throw ApiException.forbidden();
-          if (current.equals("PROCESSING")) throw ApiException.conflict("该申请正在同步资源状态，请稍后重试");
+          if (!action.equals("withdraw")) {
+            checkRevision(row, input == null ? null : input.revision());
+            if (!approval.allowed(
+                user,
+                (int) number(row, "current_step"),
+                (int) number(row, "total_steps"),
+                string(row, "applicant_department"))) throw ApiException.forbidden();
+            require(current, "PENDING");
+            if (!time(row, "approval_deadline").toInstant().isAfter(clock.instant()))
+              throw ApiException.conflict("申请已到审批截止时间，请刷新查看撤销结果");
+          }
           switch (action) {
             case "reject" -> {
-              require(current, "PENDING");
+              if (number(row, "total_steps") > 1) Rules.text(comment, 1000, true);
+              recordReview(row, id, user, "REJECT", comment, requestId);
               repo.jdbc()
                   .update(
                       "UPDATE classroom_applications SET"
@@ -127,16 +146,47 @@ class WorkflowService {
               return new Mutation("M2", id, null);
             }
             case "approve" -> {
-              require(current, "PENDING");
               if (!time(row, "start_time").toInstant().isAfter(clock.instant()))
                 throw ApiException.conflict("申请开始时间已到，不能再审批");
               repo.jdbc()
                   .update("UPDATE classroom_applications SET comment=? WHERE id=?", comment, id);
+              recordReview(row, id, user, "APPROVE", comment, requestId);
+              if (number(row, "current_step") < number(row, "total_steps")) {
+                repo.jdbc()
+                    .update(
+                        "UPDATE classroom_applications SET"
+                            + " current_step=current_step+1,last_error=NULL WHERE id=?",
+                        id);
+                repo.audit(user, "M2", id, "APPROVE_STEP", requestId);
+                return new Mutation("M2", id, null);
+              }
               return restriction("M2", id, row, true, user, requestId, "APPROVE", "APPROVED");
             }
+            case "return" -> {
+              Rules.text(comment, 1000, true);
+              recordReview(row, id, user, "RETURN", comment, requestId);
+              boolean first = number(row, "current_step") == 1;
+              repo.jdbc()
+                  .update(
+                      "UPDATE classroom_applications SET"
+                          + " status=?,current_step=1,comment=?,last_error=NULL WHERE id=?",
+                      first ? "RETURNED" : "PENDING",
+                      comment,
+                      id);
+              repo.audit(user, "M2", id, "RETURN", requestId);
+              return new Mutation("M2", id, null);
+            }
             case "withdraw" -> {
-              if (!current.equals("PENDING") && !current.equals("APPROVED"))
+              if (!List.of("PENDING", "RETURNED", "APPROVED", "PROCESSING").contains(current)
+                  || (current.equals("PROCESSING")
+                      && (number(row, "total_steps") == 1
+                          || !"APPROVE".equals(string(row, "pending_action")))))
                 throw ApiException.conflict("当前状态不能撤销申请");
+              recordReview(row, id, user, "WITHDRAW", null, requestId);
+              if (current.equals("PROCESSING")) {
+                supersede(id);
+                return restriction("M2", id, row, false, user, requestId, "WITHDRAW", "WITHDRAWN");
+              }
               if (current.equals("APPROVED")) {
                 if (!time(row, "start_time").toInstant().isAfter(clock.instant()))
                   throw ApiException.conflict("已批准申请只能在开始前撤销");
@@ -153,6 +203,124 @@ class WorkflowService {
             default -> throw ApiException.bad("未知申请操作");
           }
         });
+  }
+
+  ApprovalPolicyView approvalPolicy(User user) {
+    return approval.view(user);
+  }
+
+  List<ApprovalHistory> applicationHistory(User user, long id) {
+    return repo.history(user, id);
+  }
+
+  private void checkRevision(Map<String, Object> row, Long revision) {
+    if (revision == null && number(row, "total_steps") == 1) return;
+    if (revision == null) throw ApiException.bad("审批操作必须提供 revision");
+    if (revision != number(row, "revision")) throw ApiException.conflict("申请已被更新，请刷新后重新操作");
+  }
+
+  private void recordReview(
+      Map<String, Object> row,
+      long id,
+      User actor,
+      String action,
+      String comment,
+      String requestId) {
+    long revision = number(row, "revision") + 1;
+    repo.jdbc().update("UPDATE classroom_applications SET revision=? WHERE id=?", revision, id);
+    repo.history(
+        id,
+        (int) number(row, "current_step"),
+        revision,
+        action,
+        actor,
+        comment,
+        requestId,
+        OffsetDateTime.now(clock));
+  }
+
+  Result resubmit(User user, long id, String key, ResubmitInput input, String requestId) {
+    if (!user.has("APPLICANT") && !user.has("ADMIN")) throw ApiException.forbidden();
+    Result replay = replay(user, "M2:" + id + ":resubmit", key, input);
+    if (replay != null) return replay;
+    var existing = repo.jdbc().queryForList("SELECT * FROM classroom_applications WHERE id=?", id);
+    if (existing.isEmpty()) throw new ApiException(404, "NOT_FOUND", "记录不存在");
+    var snapshot = existing.getFirst();
+    if (number(snapshot, "applicant_id") != user.id()) throw ApiException.forbidden();
+    Classroom room = resource.classroom(number(snapshot, "classroom_id"), requestId);
+    Rules.classroomAccess(user, room);
+    Rules.applicationTime(time(snapshot, "start_time"), time(snapshot, "end_time"), room, clock);
+    String purpose = Rules.text(input.purpose(), 1000, true);
+    return write(
+        user,
+        "M2:" + id + ":resubmit",
+        key,
+        input,
+        requestId,
+        false,
+        () -> {
+          var row = repo.locked("M2", id);
+          if (number(row, "applicant_id") != user.id()) throw ApiException.forbidden();
+          checkRevision(row, input.revision());
+          require(string(row, "status"), "RETURNED");
+          if (!time(row, "approval_deadline").toInstant().isAfter(clock.instant()))
+            throw ApiException.conflict("申请已超过审批期限");
+          recordReview(row, id, user, "RESUBMIT", purpose, requestId);
+          repo.jdbc()
+              .update(
+                  "UPDATE classroom_applications SET"
+                      + " status='PENDING',current_step=1,purpose=?,applicant_department=?,last_error=NULL"
+                      + " WHERE id=?",
+                  purpose,
+                  user.department(),
+                  id);
+          repo.audit(user, "M2", id, "RESUBMIT", requestId);
+          return new Mutation("M2", id, null);
+        });
+  }
+
+  private void supersede(long id) {
+    repo.jdbc()
+        .update(
+            "UPDATE outbox SET status='SUPERSEDED',lease_until=NULL WHERE source_type='M2' AND"
+                + " source_id=? AND status IN ('PENDING','SENDING')",
+            id);
+  }
+
+  void expireApplication(long id) {
+    Long intent =
+        tx.execute(
+            status -> {
+              var row = repo.locked("M2", id);
+              String current = string(row, "status");
+              if (time(row, "approval_deadline").toInstant().isAfter(clock.instant())
+                  || (!List.of("PENDING", "RETURNED").contains(current)
+                      && !(current.equals("PROCESSING")
+                          && "APPROVE".equals(string(row, "pending_action"))))) return null;
+              String requestId = "m2-expire-" + id + "-" + number(row, "revision");
+              recordReview(row, id, null, "EXPIRE", null, requestId);
+              long actor = number(row, "applicant_id");
+              if (current.equals("PROCESSING")) {
+                supersede(id);
+                User owner =
+                    new User(
+                        actor,
+                        "",
+                        string(row, "applicant_name"),
+                        string(row, "applicant_department"),
+                        List.of("APPLICANT"));
+                return restriction("M2", id, row, false, owner, requestId, "EXPIRE", "EXPIRED")
+                    .outboxId();
+              }
+              repo.jdbc()
+                  .update(
+                      "UPDATE classroom_applications SET"
+                          + " status='EXPIRED',pending_action=NULL,last_error=NULL WHERE id=?",
+                      id);
+              repo.audit(actor, "M2", id, "EXPIRE", requestId);
+              return null;
+            });
+    if (intent != null) outbox.process(intent);
   }
 
   Result createRepair(User user, String key, RepairInput input, String requestId) {

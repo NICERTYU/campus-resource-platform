@@ -110,7 +110,7 @@ class RealNetworkRecovery(unittest.TestCase):
     @classmethod
     def launch(cls):
         java = "java"
-        if os.uname().sysname == "Darwin":
+        if os.name == "posix" and os.uname().sysname == "Darwin":
             java_home = subprocess.check_output(["/usr/libexec/java_home", "-v", "21"], text=True).strip()
             java = java_home + "/bin/java"
         cls.process = subprocess.Popen([java, "-jar", str(ROOT / "backend/workflow-app/target/workflow-app-0.1.0.jar"),
@@ -181,6 +181,11 @@ class RealNetworkRecovery(unittest.TestCase):
             "startTime": start.isoformat(), "endTime": (start + dt.timedelta(hours=1)).isoformat(), "purpose": "实际HTTP故障恢复"})
         self.assertEqual(status, 201, record)
         self.source_ids.append(record["id"])
+        if record.get("totalSteps", 1) > 1:
+            status, record = self.request("POST", "/classroom-applications/%s/approve" % record["id"],
+                                          {"comment": "初审通过", "revision": record["revision"]})
+            self.assertEqual(status, 200, record)
+            self.assertEqual(record["currentStep"], 2)
         return record
     def eventually_approved(self, application):
         deadline = time.monotonic() + 20
@@ -198,7 +203,7 @@ class RealNetworkRecovery(unittest.TestCase):
     def test_T15_real_resource_unavailable_then_restart_recovers(self):
         application = self.application()
         FaultProxy.mode = "unavailable"
-        status, record = self.request("POST", "/classroom-applications/%s/approve" % application["id"], {"comment": "通过"})
+        status, record = self.request("POST", "/classroom-applications/%s/approve" % application["id"], {"comment": "通过", "revision": application["revision"]})
         self.assertEqual(status, 202, record)
         self.assertEqual(record["status"], "PROCESSING")
         self.assertEqual(self.source_count(application), 0)
@@ -211,7 +216,7 @@ class RealNetworkRecovery(unittest.TestCase):
     def test_T15_real_resource_committed_response_lost_retries_once(self):
         application = self.application()
         FaultProxy.mode = "response-lost"
-        status, record = self.request("POST", "/classroom-applications/%s/approve" % application["id"], {"comment": "通过"}, key=uuid.uuid4().hex)
+        status, record = self.request("POST", "/classroom-applications/%s/approve" % application["id"], {"comment": "通过", "revision": application["revision"]}, key=uuid.uuid4().hex)
         self.assertEqual(status, 202, record)
         self.assertEqual(record["status"], "PROCESSING")
         self.assertEqual(self.source_count(application), 1)

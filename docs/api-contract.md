@@ -29,9 +29,12 @@
 
 ## 流程应用（8082）
 
+M2 新申请使用两级审批及版本校验，完整状态矩阵、请求示例、配置和超时补偿见 [M2 多级审批](m2-approval.md)。原单级历史记录继续按原流程处理。
+
 - `GET/POST /classroom-applications`（创建 `{classroomId,startTime,endTime,purpose}`）。
-- `POST /classroom-applications/{id}/approve` 或 `/reject` `{comment}`，`/withdraw` 空对象。
-- 申请：`{id,classroomId,classroomName,applicantId,applicantName,startTime,endTime,purpose,status,comment,pendingAction,lastError}`。状态 `PENDING,PROCESSING,APPROVED,REJECTED,WITHDRAWN`，未确认远端前显示 PROCESSING。
+- `POST /classroom-applications/{id}/approve`、`/reject`、`/return` `{comment,revision}`；`/resubmit` `{purpose,revision}`；`/withdraw` 空对象。新两级申请必须带revision；旧单级记录兼容原comment请求。
+- `GET /classroom-applications/policy` → `{steps,timeout,reviewSteps,legacyReview}`；`GET /classroom-applications/{id}/history` → 逐次事件，仅申请人或管理员可读。
+- 申请：`{id,classroomId,classroomName,applicantId,applicantName,startTime,endTime,purpose,status,comment,pendingAction,lastError,currentStep,totalSteps,revision,approvalDeadline,applicantDepartment}`。状态 `PENDING,RETURNED,PROCESSING,APPROVED,REJECTED,WITHDRAWN,EXPIRED`，未确认远端前显示 PROCESSING；初审通过仍为PENDING并进入第2级。
 - `GET/POST /repair-orders`（创建 `{classroomId,description}`）。
 - `POST /repair-orders/{id}/assign` `{technicianId}`，`/start` 空对象，`/complete` `{note}`，`/accept` `{comment}`，`/return` `{comment}`。
 - 工单：`{id,classroomId,classroomName,reporterId,reporterName,technicianId,technicianName,description,status,note,comment,pendingAction,lastError}`。状态 `REPORTED,ASSIGNED,PROCESSING,IN_PROGRESS,AWAITING_ACCEPTANCE,ACCEPTED`。
@@ -47,4 +50,4 @@
 - `PUT /internal/v1/restrictions/{sourceType}/{sourceId}`，请求 `{version,active,classroomId,startTime,endTime,actorId,requestId}`，M2 使用申请区间，M3 建立时使用服务端当前时间且 endTime=null。
 - 返回 `{version,active,applied}`。相同版本同参数幂等；旧版本不执行并返回现有版本；相同版本不同内容409；解除保留版本墓碑。M2 创建检查个人预约、其他M2及M3；M3允许既有记录及多来源并存。来源归属教室不能变更。内部身份与命令响应携带请求标识。
 
-跨应用操作先落库 outbox，网络在本地事务外，再提交最终状态。失败保留 pendingAction/lastError，每5秒重试，资源冲突回到先前状态供用户调整；超时保留处理中。解除使用递增版本，不允许旧建立请求重新生效。
+跨应用操作先落库 outbox，网络在本地事务外，再提交最终状态。网络/5xx失败保留 pendingAction/lastError，每5秒重试。新两级M2的409资源冲突也保持PROCESSING并重试，超过审批期限后转为解除补偿；旧单级M2及M3的确定性资源冲突回到先前状态。解除使用递增版本，不允许旧建立请求重新生效；被超时或撤销替代的旧意图为SUPERSEDED。

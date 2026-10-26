@@ -56,6 +56,22 @@ export interface Application {
   comment: string | null
   pendingAction: string | null
   lastError: string | null
+  currentStep: number
+  totalSteps: number
+  revision: number
+  approvalDeadline: string
+  applicantDepartment: string | null
+}
+export interface ApprovalHistory {
+  id: number
+  step: number
+  revision: number
+  action: string
+  actorId: number | null
+  actorName: string
+  comment: string | null
+  requestId: string
+  createdAt: string
 }
 export interface Repair {
   id: number

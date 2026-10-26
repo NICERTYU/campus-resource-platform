@@ -32,6 +32,16 @@ class WorkflowController {
     return service.repairs(user, page, pageSize);
   }
 
+  @GetMapping("/classroom-applications/policy")
+  ApprovalPolicyView approvalPolicy(@RequestAttribute User user) {
+    return service.approvalPolicy(user);
+  }
+
+  @GetMapping("/classroom-applications/{id}/history")
+  List<ApprovalHistory> history(@RequestAttribute User user, @PathVariable long id) {
+    return service.applicationHistory(user, id);
+  }
+
   @PostMapping("/classroom-applications")
   ResponseEntity<String> createApplication(
       @RequestAttribute User user,
@@ -47,7 +57,7 @@ class WorkflowController {
       @RequestAttribute String requestId,
       @RequestHeader(value = "Idempotency-Key", required = false) String key,
       @PathVariable long id,
-      @RequestBody(required = false) CommentInput input) {
+      @RequestBody(required = false) ReviewInput input) {
     return response(service.applicationAction(user, id, "approve", key, input, requestId));
   }
 
@@ -57,7 +67,7 @@ class WorkflowController {
       @RequestAttribute String requestId,
       @RequestHeader(value = "Idempotency-Key", required = false) String key,
       @PathVariable long id,
-      @RequestBody(required = false) CommentInput input) {
+      @RequestBody(required = false) ReviewInput input) {
     return response(service.applicationAction(user, id, "reject", key, input, requestId));
   }
 
@@ -68,6 +78,26 @@ class WorkflowController {
       @RequestHeader(value = "Idempotency-Key", required = false) String key,
       @PathVariable long id) {
     return response(service.applicationAction(user, id, "withdraw", key, null, requestId));
+  }
+
+  @PostMapping("/classroom-applications/{id}/return")
+  ResponseEntity<String> returnApplication(
+      @RequestAttribute User user,
+      @RequestAttribute String requestId,
+      @RequestHeader(value = "Idempotency-Key", required = false) String key,
+      @PathVariable long id,
+      @RequestBody ReviewInput input) {
+    return response(service.applicationAction(user, id, "return", key, input, requestId));
+  }
+
+  @PostMapping("/classroom-applications/{id}/resubmit")
+  ResponseEntity<String> resubmit(
+      @RequestAttribute User user,
+      @RequestAttribute String requestId,
+      @RequestHeader(value = "Idempotency-Key", required = false) String key,
+      @PathVariable long id,
+      @RequestBody ResubmitInput input) {
+    return response(service.resubmit(user, id, key, input, requestId));
   }
 
   @PostMapping("/repair-orders")

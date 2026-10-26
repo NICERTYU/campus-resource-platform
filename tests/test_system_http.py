@@ -9,6 +9,7 @@ import http.cookiejar
 import json
 import os
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -107,6 +108,12 @@ class SystemHttpAcceptance(unittest.TestCase):
             "endTime": self.end.isoformat(), "purpose": "HTTP跨模块验收 " + self.prefix,
         })
         self.assertIn(status, (200, 201), record)
+        if record.get("totalSteps", 1) > 1:
+            status, record = self.admin.request("POST", "/classroom-applications/%s/approve" % record["id"],
+                                                {"comment": "初审同意", "revision": record["revision"]})
+            self.assertEqual(status, 200, record)
+            self.assertEqual(record["status"], "PENDING")
+            self.assertEqual(record["currentStep"], 2)
         return record
 
     def repair(self):
@@ -157,17 +164,19 @@ class SystemHttpAcceptance(unittest.TestCase):
             return self.reservation()
         def approve():
             barrier.wait(timeout=5)
-            return self.admin.request("POST", "/classroom-applications/%s/approve" % application["id"], {"comment": "同意"})
+            return self.admin.request("POST", "/classroom-applications/%s/approve" % application["id"], {"comment": "同意", "revision": application["revision"]})
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             jobs = [pool.submit(book), pool.submit(approve)]
             results = [job.result(timeout=25) for job in jobs]
         successes = sum(status in (200, 201) and data.get("status") != "PROCESSING" for status, data in results)
         self.assertEqual(successes, 1, results)
-        self.assertIn(409, [status for status, _ in results], results)
+        self.assertTrue(any(status in (409, 202) for status, _ in results), results)
+        # A final approval conflict is durably pending; withdraw to cancel its retry.
+        self.applicant.request("POST", "/classroom-applications/%s/withdraw" % application["id"], {})
 
     def test_T03_real_approval_withdrawal_and_rejection(self):
         application = self.application()
-        status, result = self.admin.request("POST", "/classroom-applications/%s/approve" % application["id"], {"comment": "同意"})
+        status, result = self.admin.request("POST", "/classroom-applications/%s/approve" % application["id"], {"comment": "同意", "revision": application["revision"]})
         self.assertEqual(status, 200, result)
         self.assertEqual(result["status"], "APPROVED")
         self.assertTrue(all(not seat["available"] for seat in self.availability()))
@@ -177,14 +186,14 @@ class SystemHttpAcceptance(unittest.TestCase):
         self.assertEqual(result["status"], "WITHDRAWN")
         self.assertTrue(all(seat["available"] for seat in self.availability()))
         application = self.application()
-        status, result = self.admin.request("POST", "/classroom-applications/%s/reject" % application["id"], {"comment": "用途不符"})
+        status, result = self.admin.request("POST", "/classroom-applications/%s/reject" % application["id"], {"comment": "用途不符", "revision": application["revision"]})
         self.assertEqual(status, 200, result)
         self.assertEqual(result["status"], "REJECTED")
         self.assertTrue(all(seat["available"] for seat in self.availability()))
 
     def test_T04_T05_two_repairs_and_approved_application(self):
         application = self.application()
-        self.assertEqual(self.admin.request("POST", "/classroom-applications/%s/approve" % application["id"], {"comment": "同意"})[0], 200)
+        self.assertEqual(self.admin.request("POST", "/classroom-applications/%s/approve" % application["id"], {"comment": "同意", "revision": application["revision"]})[0], 200)
         first, second = self.repair(), self.repair()
         self.assertTrue(all(not seat["available"] for seat in self.availability()))
         self.accept(first)
@@ -274,6 +283,49 @@ class SystemHttpAcceptance(unittest.TestCase):
         self.assertEqual(first, second)
         body["description"] = "不同请求"
         self.assertEqual(self.student.request("POST", "/repair-orders", body, key=key)[0], 409)
+
+    def test_T22_two_stages_revision_and_history_with_real_identity(self):
+        status, record = self.applicant.request("POST", "/classroom-applications", {
+            "classroomId": self.room, "startTime": self.start.isoformat(),
+            "endTime": self.end.isoformat(), "purpose": "多级审批真实身份验收",
+        })
+        self.assertEqual(status, 201, record)
+        self.assertEqual(record["totalSteps"], 2)
+        path = "/classroom-applications/%s" % record["id"]
+        body = {"comment": "初审", "revision": record["revision"]}
+        status, reviewed = self.admin.request("POST", path + "/approve", body, key=self.prefix)
+        self.assertEqual(status, 200, reviewed)
+        self.assertEqual(reviewed["currentStep"], 2)
+        self.assertTrue(all(seat["available"] for seat in self.availability()))
+        self.assertEqual(self.admin.request("POST", path + "/approve", body)[0], 409)
+        status, result = self.admin.request("POST", path + "/approve", {"comment": "终审", "revision": reviewed["revision"]})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["status"], "APPROVED")
+        status, history = self.applicant.request("GET", path + "/history")
+        self.assertEqual(status, 200)
+        self.assertEqual([row["step"] for row in history], [1, 1, 2])
+        self.assertEqual(self.student.request("GET", path + "/history")[0], 403)
+        self.assertEqual(self.applicant.request("POST", path + "/withdraw", {})[0], 200)
+
+    def test_T23_reservation_conflict_stays_processing_and_retry_recovers(self):
+        status, booking = self.reservation()
+        self.assertIn(status, (200, 201), booking)
+        application = self.application()
+        path = "/classroom-applications/%s" % application["id"]
+        status, pending = self.admin.request("POST", path + "/approve", {"comment": "终审", "revision": application["revision"]})
+        self.assertEqual(status, 202, pending)
+        self.assertEqual(pending["status"], "PROCESSING")
+        self.assertTrue(pending["lastError"])
+        self.assertEqual(self.student.request("POST", "/reservations/%s/cancel" % booking["id"], {})[0], 200)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            records = self.applicant.request("GET", "/classroom-applications")[1]
+            current = next(row for row in records if row["id"] == application["id"])
+            if current["status"] == "APPROVED":
+                break
+            time.sleep(0.2)
+        self.assertEqual(current["status"], "APPROVED", current)
+        self.assertEqual(self.applicant.request("POST", path + "/withdraw", {})[0], 200)
 
 
 if __name__ == "__main__":

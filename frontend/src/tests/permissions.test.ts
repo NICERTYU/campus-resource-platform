@@ -46,4 +46,18 @@ describe('application withdrawal eligibility', () => {
     ).toBe(true)
     expect(canWithdraw({ ...application, status: 'PROCESSING' }, admin, before)).toBe(false)
   })
+  it('allows returned and approval-sync withdrawals but never a pending release', () => {
+    expect(canWithdraw({ ...application, status: 'RETURNED' }, applicant, before)).toBe(true)
+    expect(
+      canWithdraw(
+        { ...application, status: 'PROCESSING', pendingAction: 'APPROVE' },
+        applicant,
+        before,
+      ),
+    ).toBe(true)
+    expect(
+      canWithdraw({ ...application, status: 'PROCESSING', pendingAction: 'EXPIRE' }, admin, before),
+    ).toBe(false)
+    expect(canWithdraw({ ...application, status: 'EXPIRED' }, applicant, before)).toBe(false)
+  })
 })

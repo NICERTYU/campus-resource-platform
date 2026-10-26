@@ -8,6 +8,8 @@ export const statusLabel: Record<string, string> = {
   APPROVED: '已通过',
   REJECTED: '已驳回',
   WITHDRAWN: '已撤销',
+  RETURNED: '待补充重提',
+  EXPIRED: '超时已撤销',
   REPORTED: '待派单',
   ASSIGNED: '已派单',
   IN_PROGRESS: '维修中',

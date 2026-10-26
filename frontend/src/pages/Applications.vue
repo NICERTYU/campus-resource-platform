@@ -9,7 +9,7 @@ import { useAuth } from '../stores/auth'
 import { canWithdraw } from '../lib/permissions'
 import { request, write, errorMessage } from '../lib/api'
 import { interval, nextSlot, isoMinute, validTimes } from '../lib/time'
-import type { Application, Classroom } from '../lib/types'
+import type { Application, Classroom, ApprovalHistory } from '../lib/types'
 const auth = useAuth(),
   records = ref<Application[]>([]),
   rooms = ref<Classroom[]>([]),
@@ -25,6 +25,47 @@ const auth = useAuth(),
   action = ref<{ record: Application; type: string } | null>(null),
   comment = ref('')
 const hours = Array.from({ length: 25 }, (_, i) => i)
+const reviewSteps = ref<number[]>([])
+const legacyReview = ref(false)
+const historyOpen = ref(false)
+const history = ref<ApprovalHistory[]>([])
+const actionTitle: Record<string, string> = {
+  approve: '通过',
+  reject: '驳回',
+  withdraw: '撤销',
+  return: '退回',
+  resubmit: '重新提交',
+}
+const historyAction: Record<string, string> = {
+  CREATE: '提交申请',
+  APPROVE: '审核通过',
+  REJECT: '驳回',
+  RETURN: '退回',
+  RESUBMIT: '补充重提',
+  WITHDRAW: '撤销申请',
+  EXPIRE: '超时撤销',
+}
+function canReview(record: Application) {
+  return (
+    auth.isAdmin &&
+    record.status === 'PENDING' &&
+    (record.totalSteps === 1
+      ? legacyReview.value
+      : reviewSteps.value.includes(record.currentStep)) &&
+    (record.totalSteps === 1 ||
+      record.currentStep !== 1 ||
+      !record.applicantDepartment ||
+      record.applicantDepartment === auth.user?.department)
+  )
+}
+async function showHistory(record: Application) {
+  try {
+    history.value = await request<ApprovalHistory[]>(`/classroom-applications/${record.id}/history`)
+    historyOpen.value = true
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  }
+}
 let poll: ReturnType<typeof setInterval> | undefined
 const pager = usePagination()
 let loadGeneration = 0
@@ -75,19 +116,23 @@ async function create() {
 }
 function openAction(record: Application, type: string) {
   action.value = { record, type }
-  comment.value = ''
+  comment.value = type === 'resubmit' ? record.purpose : ''
 }
 async function execute() {
   if (!action.value) return
-  if (action.value.type === 'reject' && !comment.value.trim()) {
-    ElMessage.warning('请填写驳回原因')
+  if (['reject', 'return', 'resubmit'].includes(action.value.type) && !comment.value.trim()) {
+    ElMessage.warning('请填写原因或修改后的用途')
     return
   }
   saving.value = true
   try {
     await write(
       `/classroom-applications/${action.value.record.id}/${action.value.type}`,
-      action.value.type === 'withdraw' ? {} : { comment: comment.value.trim() },
+      action.value.type === 'withdraw'
+        ? {}
+        : action.value.type === 'resubmit'
+          ? { purpose: comment.value.trim(), revision: action.value.record.revision }
+          : { comment: comment.value.trim(), revision: action.value.record.revision },
     )
     action.value = null
     ElMessage.success('操作已提交')
@@ -101,13 +146,22 @@ async function execute() {
 onMounted(async () => {
   await load()
   try {
+    const policy = await request<{ reviewSteps: number[]; legacyReview: boolean }>(
+      '/classroom-applications/policy',
+    )
+    reviewSteps.value = policy.reviewSteps
+    legacyReview.value = policy.legacyReview
     rooms.value = await request<Classroom[]>('/classrooms')
     roomId.value = rooms.value.find((r) => r.enabled)?.id
   } catch (e) {
     error.value = errorMessage(e)
   }
   poll = setInterval(() => {
-    if (!loading.value && records.value.some((r) => r.status === 'PROCESSING')) void load(true)
+    if (
+      !loading.value &&
+      records.value.some((r) => ['PROCESSING', 'PENDING', 'RETURNED'].includes(r.status))
+    )
+      void load(true)
   }, 5000)
 })
 onUnmounted(() => clearInterval(poll))
@@ -145,6 +199,11 @@ onUnmounted(() => clearInterval(poll))
       <p class="workflow-time">◷ {{ interval(r.startTime, r.endTime) }}</p>
       <p class="workflow-description">{{ r.purpose }}</p>
       <p class="muted">
+        审批节点：{{ r.currentStep }} / {{ r.totalSteps }} · 截止：{{
+          new Date(r.approvalDeadline).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
+        }}
+      </p>
+      <p class="muted">
         申请人：{{ r.applicantName
         }}<template v-if="r.comment"> · 审批意见：{{ r.comment }}</template>
       </p>
@@ -155,12 +214,19 @@ onUnmounted(() => clearInterval(poll))
         :closable="false"
       /><el-alert v-if="r.lastError" :title="r.lastError" type="warning" :closable="false" />
       <div class="workflow-actions">
-        <template v-if="auth.isAdmin && r.status === 'PENDING'"
+        <template v-if="canReview(r)"
           ><el-button type="primary" @click="openAction(r, 'approve')">通过申请</el-button
-          ><el-button @click="openAction(r, 'reject')">驳回</el-button></template
+          ><el-button @click="openAction(r, 'reject')">驳回</el-button>
+          <el-button @click="openAction(r, 'return')">退回</el-button></template
         ><el-button v-if="canWithdraw(r, auth.user)" @click="openAction(r, 'withdraw')"
           >撤销申请</el-button
         >
+        <el-button
+          v-if="r.status === 'RETURNED' && r.applicantId === auth.user?.id"
+          @click="openAction(r, 'resubmit')"
+          >补充重提</el-button
+        >
+        <el-button @click="showHistory(r)">审批记录</el-button>
       </div>
     </div>
     <el-empty v-if="!records.length" description="暂无教室申请" :image-size="90" />
@@ -217,9 +283,7 @@ onUnmounted(() => clearInterval(poll))
   ><el-dialog
     :model-value="!!action"
     @close="action = null"
-    :title="
-      action?.type === 'approve' ? '通过申请' : action?.type === 'reject' ? '驳回申请' : '撤销申请'
-    "
+    :title="`${actionTitle[action?.type ?? ''] ?? ''}申请`"
     width="460px"
     ><p>{{ action?.record.classroomName }} · 申请 #{{ action?.record.id }}</p>
     <p class="muted" v-if="action?.type === 'withdraw'">
@@ -235,10 +299,17 @@ onUnmounted(() => clearInterval(poll))
     /><template #footer
       ><el-button @click="action = null" :disabled="saving">取消</el-button
       ><el-button type="primary" :loading="saving" @click="execute"
-        >确认{{
-          action?.type === 'approve' ? '通过' : action?.type === 'reject' ? '驳回' : '撤销'
-        }}</el-button
+        >确认{{ actionTitle[action?.type ?? ''] }}</el-button
       ></template
     ></el-dialog
   >
+  <el-dialog v-model="historyOpen" title="审批记录" width="560px">
+    <p v-for="entry in history" :key="entry.id">
+      {{ new Date(entry.createdAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) }} · 第{{
+        entry.step
+      }}级 · {{ entry.actorName }} · {{ historyAction[entry.action] ?? entry.action }}
+      <span v-if="entry.comment"> · {{ entry.comment }}</span>
+    </p>
+    <p v-if="!history.length" class="muted">旧记录未留存逐级审批历史。</p>
+  </el-dialog>
 </template>

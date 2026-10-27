@@ -29,6 +29,12 @@
 
 ## 验收记录
 
+### 阶段 1 依赖修复与权限规则
+
+基线53项Vitest通过。安装审计发现锁定的开发依赖undici7.30.0命中安全公告，最小更新为7.30.1（仅lockfile中该包三行变化），重新npm ci后为零漏洞；依据见[上游公告](https://github.com/nodejs/undici/security/advisories/GHSA-xjj6-f33q-929c)。
+
+新增applications辅助模块及21项规则/文案测试，累计74项Vitest通过；Node24.21.0下vue-tsc及Vite生产构建通过。矩阵涵盖节点白名单、院系、旧单级、期限相等、重提归属、处理中建立/解除，以及401/403/409请求编号。页面尚待接入。
+
 本次新增验收尚未执行。当前Windows无Docker、Java及WSL Linux；前端使用项目私有Node24.21.0；真实PostgreSQL/HTTP及整站浏览器由现有CI验证。fixture、跳过项及队友历史结果不计为本次真实服务通过。
 
 ## AI 协作与工程伦理材料

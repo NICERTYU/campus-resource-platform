@@ -125,8 +125,11 @@ test('@fixture M2 real error payload remains visible and stale revision cannot b
 test('@fixture M2 deadline while confirming disables review and waits for server expiry', async ({
   page,
 }) => {
-  await fixture(page, [record(101, { approvalDeadline: '2030-10-27T10:00:01+08:00' })])
+  await fixture(page, [record(101, { approvalDeadline: '2030-10-27T10:10:01+08:00' })])
+  // Load naturally, then pause before the deadline so cold-start time cannot consume the boundary.
+  await page.clock.pauseAt(new Date('2030-10-27T10:10:00+08:00'))
   await page.getByRole('button', { name: '通过申请' }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
   await page.clock.runFor(1100)
   await expect(page.getByRole('button', { name: '确认通过', exact: true })).toBeDisabled()
   await expect(page.locator('.workflow-card')).toContainText('等待服务端确认超时撤销')

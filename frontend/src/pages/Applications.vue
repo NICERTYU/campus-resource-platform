@@ -51,6 +51,7 @@ const traces = ref<Record<string, string>>({})
 const tracePending = new Set<string>()
 const pager = usePagination()
 let active = true,
+  listPending = false,
   loadGeneration = 0,
   policyGeneration = 0,
   historyGeneration = 0,
@@ -102,11 +103,18 @@ function clearPrivateData() {
   historyRecord.value = null
   history.value = []
   loading.value = false
+  listPending = false
   historyLoading.value = false
 }
 watch(
-  () => auth.user?.id,
-  () => clearPrivateData(),
+  () => auth.user && JSON.stringify([auth.user.id, auth.user.department, auth.user.roles]),
+  () => {
+    clearPrivateData()
+    purpose.value = ''
+    comment.value = ''
+    feedback.value = null
+    resultMessage.value = ''
+  },
 )
 function sessionDenied(e: unknown) {
   if (e instanceof ApiError && e.status === 401) clearPrivateData()
@@ -159,6 +167,7 @@ async function loadTrace(record: Application, generation: number) {
 async function load(silent = false, target = pager.page) {
   if (!Number.isInteger(target) || target < 1) return
   const generation = ++loadGeneration
+  listPending = true
   if (!silent) loading.value = true
   error.value = ''
   try {
@@ -175,7 +184,10 @@ async function load(silent = false, target = pager.page) {
     error.value = errorMessage(e)
     if (e instanceof ApiError && [401, 403].includes(e.status)) clearPrivateData()
   } finally {
-    if (active && generation === loadGeneration) loading.value = false
+    if (active && generation === loadGeneration) {
+      loading.value = false
+      listPending = false
+    }
   }
 }
 async function refresh() {
@@ -242,6 +254,7 @@ async function create() {
   }
 }
 function openAction(record: Application, type: ApprovalAction) {
+  now.value = Date.now()
   if (saving.value || !allowed(record, type)) return
   action.value = { record: { ...record }, type }
   feedback.value = null
@@ -249,6 +262,7 @@ function openAction(record: Application, type: ApprovalAction) {
   comment.value = type === 'resubmit' ? record.purpose : ''
 }
 async function execute() {
+  now.value = Date.now()
   if (saving.value || !action.value || actionInvalid.value) return
   const selected = action.value,
     epoch = accessEpoch
@@ -294,6 +308,7 @@ onMounted(() => {
   poll = setInterval(() => {
     if (
       !loading.value &&
+      !listPending &&
       !saving.value &&
       auth.user &&
       records.value.some((r) => ['PROCESSING', 'PENDING', 'RETURNED'].includes(r.status))

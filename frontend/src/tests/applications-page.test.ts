@@ -260,4 +260,38 @@ describe('M2 approval page acceptance', () => {
     await vi.advanceTimersByTimeAsync(10000)
     expect(request).toHaveBeenCalledTimes(calls)
   })
+  it('checks wall time at confirmation even before the next one-second UI tick', async () => {
+    rows[0]!.approvalDeadline = '2030-10-27T10:00:00.500+08:00'
+    const wrapper = await render()
+    await button(wrapper, '通过申请').trigger('click')
+    vi.setSystemTime(new Date('2030-10-27T10:00:00.500+08:00'))
+    await button(wrapper, '确认通过').trigger('click')
+    expect(write).not.toHaveBeenCalled()
+    expect(button(wrapper, '确认通过').attributes('disabled')).toBeDefined()
+  })
+  it('clears administrator records on same-account role demotion and rejects late responses', async () => {
+    const wrapper = await render(),
+      pending = deferred<Application[]>()
+    vi.mocked(request).mockReturnValue(pending.promise)
+    await button(wrapper, '刷新').trigger('click')
+    useAuth().user = { ...useAuth().user!, roles: ['STUDENT'] }
+    await flushPromises()
+    pending.resolve([record(999)])
+    await flushPromises()
+    expect(wrapper.findAll('.workflow-card')).toHaveLength(0)
+  })
+  it('does not pile up silent polls while a slow list request is still pending', async () => {
+    await render()
+    const pending = deferred<Application[]>()
+    const original = vi.mocked(request).getMockImplementation()!
+    vi.mocked(request).mockImplementation((path) =>
+      path.includes('?page=') ? pending.promise : original(path),
+    )
+    await vi.advanceTimersByTimeAsync(5000)
+    const calls = vi.mocked(request).mock.calls.length
+    await vi.advanceTimersByTimeAsync(15000)
+    expect(request).toHaveBeenCalledTimes(calls)
+    pending.resolve(rows)
+    await flushPromises()
+  })
 })

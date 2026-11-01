@@ -6,9 +6,9 @@ import PagePager from '../components/PagePager.vue'
 import { usePagination } from '../lib/pagination'
 import StatusTag from '../components/StatusTag.vue'
 import { request, write, errorMessage } from '../lib/api'
-import { interval, dateTime } from '../lib/time'
+import { interval, dateTime, isoHour } from '../lib/time'
 import { reasonLabel } from '../lib/status'
-import type { Reservation, Violation } from '../lib/types'
+import type { Notification, Reservation, Violation } from '../lib/types'
 const records = ref<Reservation[]>([]),
   violations = ref<Violation[]>([]),
   loading = ref(false),
@@ -16,7 +16,12 @@ const records = ref<Reservation[]>([]),
   error = ref(''),
   tab = ref('current'),
   selected = ref<Reservation | null>(null),
-  code = ref('')
+  code = ref(''),
+  reuseTarget = ref<Reservation | null>(null),
+  reuseDate = ref(''),
+  reuseStart = ref(9),
+  reuseEnd = ref(10),
+  notifications = ref<Notification[]>([])
 const current = computed(() =>
     records.value.filter((r) => ['PENDING', 'CHECKED_IN'].includes(r.status)),
   ),
@@ -38,6 +43,12 @@ async function load(target = pager.page) {
         violations.value = result
         pager.accept(target, result.length)
       }
+    } else if (view === 'notifications') {
+      const result = await request<Notification[]>(`/notifications/mine?${pager.query(target)}`)
+      if (generation === loadGeneration) {
+        notifications.value = result
+        pager.accept(target, result.length)
+      }
     } else {
       const result = await request<Reservation[]>(
         `/reservations/mine?${pager.query(target)}&statusGroup=${view}`,
@@ -57,6 +68,7 @@ watch(tab, () => {
   pager.reset()
   records.value = []
   violations.value = []
+  notifications.value = []
   void load(1)
 })
 async function cancel(r: Reservation) {
@@ -78,6 +90,33 @@ async function cancel(r: Reservation) {
 function openCheckIn(reservation: Reservation) {
   selected.value = reservation
   code.value = ''
+}
+function openReuse(reservation: Reservation) {
+  reuseTarget.value = reservation
+  reuseDate.value = reservation.startTime.slice(0, 10)
+  reuseStart.value = Number(reservation.startTime.slice(11, 13))
+  reuseEnd.value = reuseStart.value + Math.max(1, Math.round((Date.parse(reservation.endTime) - Date.parse(reservation.startTime)) / 3600000))
+}
+async function reuse() {
+  if (!reuseTarget.value || !reuseDate.value || reuseEnd.value <= reuseStart.value) {
+    ElMessage.warning('请选择新的整点预约时段')
+    return
+  }
+  saving.value = true
+  try {
+    await write(`/reservations/${reuseTarget.value.id}/reuse`, {
+      startTime: isoHour(reuseDate.value, reuseStart.value),
+      endTime: isoHour(reuseDate.value, reuseEnd.value),
+    })
+    reuseTarget.value = null
+    ElMessage.success('已按新的时段创建预约')
+    tab.value = 'current'
+    await load(1)
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  } finally {
+    saving.value = false
+  }
 }
 async function checkIn() {
   if (!selected.value) return
@@ -111,13 +150,15 @@ onMounted(() => load())
     <div>
       <span class="eyebrow">YOUR RECORDS</span
       ><strong
-        >{{ tab === 'violations' ? violations.length : records.length
+        >{{ tab === 'violations' ? violations.length : tab === 'notifications' ? notifications.length : records.length
         }}<small>{{
           tab === 'current'
             ? ' 个本页当前预约'
             : tab === 'history'
               ? ' 个本页历史预约'
-              : ' 条本页违约记录'
+              : tab === 'violations'
+                ? ' 条本页违约记录'
+                : ' 条本页通知事件'
         }}</small></strong
       >
     </div>
@@ -132,8 +173,8 @@ onMounted(() => load())
     <el-tabs v-model="tab"
       ><el-tab-pane label="当前预约" name="current" /><el-tab-pane
         label="历史记录"
-        name="history" /><el-tab-pane label="违约记录" name="violations" /></el-tabs
-    ><template v-if="tab !== 'violations'"
+        name="history" /><el-tab-pane label="违约记录" name="violations" /><el-tab-pane label="通知事件" name="notifications" /></el-tabs
+    ><template v-if="tab !== 'violations' && tab !== 'notifications'"
       ><div v-for="r in tab === 'current' ? current : history" :key="r.id" class="booking-row">
         <div class="booking-seat-icon">▦</div>
         <div class="booking-details">
@@ -156,13 +197,13 @@ onMounted(() => load())
           <el-button v-if="r.status === 'PENDING'" type="primary" @click="openCheckIn(r)"
             >去签到</el-button
           ><el-button @click="cancel(r)" :disabled="saving">取消预约</el-button>
-        </div>
+        </div><div class="row-actions" v-else-if="tab === 'history'"><el-button @click="openReuse(r)">再次预约</el-button></div>
       </div>
       <el-empty
         v-if="!(tab === 'current' ? current : history).length"
         :description="tab === 'current' ? '还没有当前预约，去发现一个好位置吧' : '暂无历史预约'"
         :image-size="90" /></template
-    ><template v-else
+    ><template v-else-if="tab === 'violations'"
       ><el-alert
         v-if="violations.length"
         title="未按时签到会形成违约记录，请合理安排预约。"
@@ -177,6 +218,15 @@ onMounted(() => load())
         ></el-table
       ><el-empty v-else description="暂无违约记录，感谢你珍惜校园资源" :image-size="90"
     /></template>
+    <template v-else>
+      <el-table :data="notifications" empty-text="暂无通知事件">
+        <el-table-column prop="reservationId" label="预约编号" width="100" />
+        <el-table-column label="类型"><template #default="{ row }">{{ row.type === 'PRE_START_REMINDER' ? '开始前提醒' : row.type === 'NO_SHOW_WARNING' ? '未签到提醒' : '取消通知' }}</template></el-table-column>
+        <el-table-column prop="status" label="状态" />
+        <el-table-column label="计划时间"><template #default="{ row }">{{ dateTime(row.scheduledAt) }}</template></el-table-column>
+        <el-table-column label="发送时间"><template #default="{ row }">{{ row.deliveredAt ? dateTime(row.deliveredAt) : '待处理' }}</template></el-table-column>
+      </el-table>
+    </template>
     <PagePager
       :page="pager.page"
       :page-size="pager.pageSize"
@@ -199,4 +249,13 @@ onMounted(() => load())
       ><el-button type="primary" :loading="saving" @click="checkIn">确认签到</el-button></template
     ></el-dialog
   >
+  <el-dialog :model-value="!!reuseTarget" @close="reuseTarget = null" title="再次预约" width="450px">
+    <p>{{ reuseTarget?.classroomName }} · {{ reuseTarget?.seatLabel }}</p>
+    <el-form label-position="top">
+      <el-form-item label="新的学习日期"><el-date-picker v-model="reuseDate" type="date" value-format="YYYY-MM-DD" format="YYYY-MM-DD" :clearable="false" /></el-form-item>
+      <el-form-item label="开始时间"><el-select v-model="reuseStart"><el-option v-for="h in 24" :key="h - 1" :value="h - 1" :label="`${String(h - 1).padStart(2, '0')}:00`" /></el-select></el-form-item>
+      <el-form-item label="结束时间"><el-select v-model="reuseEnd"><el-option v-for="h in 24" :key="h" :value="h" :label="`${String(h).padStart(2, '0')}:00`" :disabled="h <= reuseStart" /></el-select></el-form-item>
+    </el-form>
+    <template #footer><el-button @click="reuseTarget = null">取消</el-button><el-button type="primary" :loading="saving" @click="reuse">确认再次预约</el-button></template>
+  </el-dialog>
 </template>

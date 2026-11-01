@@ -449,9 +449,33 @@ class ResourceService {
                 target.id(),
                 stamp(slot),
                 id);
+          scheduleNotifications(current.id(), id, input.startTime().toInstant(), input.endTime().toInstant());
           audit(actor.id(), "RESERVATION_CREATED", "reservation", id, requestId);
           return reservation(id);
         });
+  }
+
+  Object reuse(User actor, long id, ReuseRequest input, String key, String requestId) {
+    if (!actor.has("STUDENT")) throw ApiError.forbidden();
+    if (input == null || input.startTime() == null || input.endTime() == null)
+      throw ApiError.bad("请提供新的预约时段");
+    Reservation previous = reservation(id);
+    own(actor, id);
+    if (List.of("PENDING", "CHECKED_IN").contains(previous.status()))
+      throw ApiError.conflict("当前预约不能作为历史记录复用");
+    return reserve(actor, new ReserveRequest(previous.seatId(), input.startTime(), input.endTime()), key, requestId);
+  }
+
+  private void scheduleNotifications(long userId, long reservationId, Instant start, Instant end) {
+    Instant created = now();
+    db.update(
+        "INSERT INTO reservation_notifications(reservation_id,user_id,type,scheduled_at,created_at)"
+            + " VALUES(?,?,?,?,?) ON CONFLICT(reservation_id,type) DO NOTHING",
+        reservationId, userId, "PRE_START_REMINDER", start.minus(Duration.ofMinutes(15)), stamp(created));
+    db.update(
+        "INSERT INTO reservation_notifications(reservation_id,user_id,type,scheduled_at,created_at)"
+            + " VALUES(?,?,?,?,?) ON CONFLICT(reservation_id,type) DO NOTHING",
+        reservationId, userId, "NO_SHOW_WARNING", start.plus(Duration.ofMinutes(10)), stamp(created));
   }
 
   Object cancel(User actor, long id, String key, String requestId) {
@@ -616,6 +640,12 @@ class ResourceService {
               + " CONFLICT(reservation_id,reason) DO NOTHING",
           stamp(now()),
           reservation.id());
+    if (!maintenance)
+      db.update(
+          "INSERT INTO reservation_notifications(reservation_id,user_id,type,scheduled_at,created_at)"
+              + " SELECT id,user_id,'CANCELLED_NOTICE',?,? FROM reservations WHERE id=?"
+              + " ON CONFLICT(reservation_id,type) DO NOTHING",
+          stamp(now()), stamp(now()), reservation.id());
     audit(
         null,
         maintenance ? "RESERVATION_MAINTENANCE_CANCELLED" : "RESERVATION_NO_SHOW",
@@ -646,6 +676,93 @@ class ResourceService {
         actor.id(),
         pageSize,
         pageOffset);
+  }
+
+  List<Notification> notifications(User actor, int page, int pageSize) {
+    long pageOffset = pageOffset(page, pageSize);
+    return db.query(
+        "SELECT id,reservation_id,type,scheduled_at,status,delivered_at FROM"
+            + " reservation_notifications WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
+        (rs, n) ->
+            new Notification(
+                rs.getLong("id"),
+                rs.getLong("reservation_id"),
+                rs.getString("type"),
+                offset(rs, "scheduled_at"),
+                rs.getString("status"),
+                offset(rs, "delivered_at")),
+        actor.id(),
+        pageSize,
+        pageOffset);
+  }
+
+  void processNotifications() {
+    tx.executeWithoutResult(
+        status -> {
+          Instant current = now();
+          db.update(
+              "INSERT INTO reservation_notifications(reservation_id,user_id,type,scheduled_at,created_at)"
+                  + " SELECT id,user_id,'PRE_START_REMINDER',start_time-interval '15 minutes',?"
+                  + " FROM reservations WHERE status='PENDING' ON CONFLICT(reservation_id,type) DO NOTHING",
+              stamp(current));
+          db.update(
+              "INSERT INTO reservation_notifications(reservation_id,user_id,type,scheduled_at,created_at)"
+                  + " SELECT id,user_id,'NO_SHOW_WARNING',start_time+interval '10 minutes',?"
+                  + " FROM reservations WHERE status='PENDING' ON CONFLICT(reservation_id,type) DO NOTHING",
+              stamp(current));
+          db.update(
+              "UPDATE reservation_notifications n SET status='SENT',delivered_at=? FROM reservations r"
+                  + " WHERE n.reservation_id=r.id AND n.status='PENDING' AND n.scheduled_at<=?"
+                  + " AND ((n.type='PRE_START_REMINDER' AND r.status='PENDING')"
+                  + " OR (n.type='NO_SHOW_WARNING' AND r.status='PENDING')"
+                  + " OR n.type='CANCELLED_NOTICE')",
+              stamp(current), stamp(current));
+          db.update(
+              "UPDATE reservation_notifications n SET status='SKIPPED' FROM reservations r"
+                  + " WHERE n.reservation_id=r.id AND n.status='PENDING' AND n.scheduled_at<=?"
+                  + " AND n.type IN('PRE_START_REMINDER','NO_SHOW_WARNING') AND r.status<>'PENDING'",
+              stamp(current));
+        });
+  }
+
+  List<Map<String, Object>> statistics(User actor, Long classroomId, OffsetDateTime from, OffsetDateTime to) {
+    require(actor, "ADMIN");
+    TimeRules.interval(from, to);
+    if (!from.toInstant().isBefore(to.toInstant())) throw ApiError.bad("统计时间范围不正确");
+    return db.query(
+        "SELECT c.id,c.name,count(DISTINCT s.id)::int seat_count,"
+            + " COALESCE(sum(CASE WHEN r.status IN('PENDING','CHECKED_IN','COMPLETED') THEN"
+            + " EXTRACT(EPOCH FROM (LEAST(r.end_time,?::timestamptz)-GREATEST(r.start_time,?::timestamptz)))/3600 ELSE 0 END),0) reserved_hours,"
+            + " COALESCE(sum(CASE WHEN r.status IN('CHECKED_IN','COMPLETED') THEN"
+            + " EXTRACT(EPOCH FROM (LEAST(r.end_time,?::timestamptz)-GREATEST(r.start_time,?::timestamptz)))/3600 ELSE 0 END),0) used_hours,"
+            + " count(*) FILTER (WHERE r.status='CANCELLED')::int cancelled_count,"
+            + " count(*) FILTER (WHERE r.status='NO_SHOW')::int no_show_count,"
+            + " COALESCE((SELECT sum(EXTRACT(EPOCH FROM (LEAST(COALESCE(x.end_time,?::timestamptz),?::timestamptz)-GREATEST(x.start_time,?::timestamptz)))/3600)"
+            + " FROM restrictions x WHERE x.classroom_id=c.id AND x.source_type='M3' AND x.active"
+            + " AND x.start_time<?::timestamptz AND (x.end_time IS NULL OR x.end_time>?::timestamptz)),0) maintenance_hours"
+            + " FROM classrooms c LEFT JOIN seats s ON s.classroom_id=c.id"
+            + " LEFT JOIN reservations r ON r.seat_id=s.id AND r.start_time<?::timestamptz AND r.end_time>?::timestamptz"
+            + " WHERE (?::bigint IS NULL OR c.id=?) GROUP BY c.id,c.name ORDER BY c.id",
+        (rs, n) -> {
+          int seats = rs.getInt("seat_count");
+          double hours = Duration.between(from.toInstant(), to.toInstant()).toSeconds() / 3600d;
+          double capacity = seats * hours;
+          double used = rs.getDouble("used_hours");
+          Map<String, Object> row = new LinkedHashMap<>();
+          row.put("classroomId", rs.getLong("id"));
+          row.put("classroomName", rs.getString("name"));
+          row.put("seatCount", seats);
+          row.put("reservedHours", rs.getDouble("reserved_hours"));
+          row.put("usedHours", used);
+          row.put("utilizationRate", capacity == 0 ? 0d : used / capacity);
+          row.put("cancelledCount", rs.getInt("cancelled_count"));
+          row.put("noShowCount", rs.getInt("no_show_count"));
+          row.put("maintenanceHours", rs.getDouble("maintenance_hours"));
+          row.put("from", from);
+          row.put("to", to);
+          return row;
+        },
+        stamp(to), stamp(from), stamp(to), stamp(from), stamp(to), stamp(to), stamp(from), stamp(to), stamp(from), stamp(to), stamp(from), classroomId, classroomId);
   }
 
   RestrictionResult restriction(String type, long sourceId, RestrictionInput input) {

@@ -11,9 +11,12 @@
 - `GET /classrooms` → `[{id,name,building,floor,department,openTime,closeTime,enabled,seatCount}]`。
 - `GET /seats/availability?classroomId=&startTime=&endTime=&hasPower=` → `[{id,classroomId,label,hasPower,available,restrictionTypes}]`，不可用不泄露他人资料。
 - `POST /reservations` `{seatId,startTime,endTime}`；`GET /reservations/mine`；`POST /reservations/{id}/cancel`；`POST /reservations/{id}/check-in` `{code}`。
+- `POST /reservations/{id}/reuse` `{startTime,endTime}` → 使用本人历史预约的座位发起一条新的预约；服务端重新校验时间、权限、开放时间、冲突和维修/审批限制，不复制原预约状态。
 - 预约：`{id,seatId,seatLabel,classroomId,classroomName,startTime,endTime,status,checkInDeadline,checkedInAt,cancelReason}`，状态 `PENDING,CHECKED_IN,CANCELLED,NO_SHOW,COMPLETED`。
+- `GET /notifications/mine?page=1&pageSize=50` → `{id,reservationId,type,scheduledAt,status,deliveredAt}`；通知类型为 `PRE_START_REMINDER`、`NO_SHOW_WARNING`、`CANCELLED_NOTICE`。同一预约和类型只产生一条事件，扫描重复执行安全。
 - `GET /violations/mine` → 数组；管理端 `GET /admin/users`，`GET /admin/check-in-codes`，`GET /admin/audit-logs`，`GET/PUT /admin/settings`（`{maxReservationHours}`），`POST /admin/classrooms`，`PUT /admin/classrooms/{id}`，`POST /admin/classrooms/{id}/seats`，`PUT /admin/seats/{id}`。
 - 签到码由管理员每天为每教室设置，`PUT /admin/check-in-codes/{classroomId}` `{code}`，存储摘要，查询只返回已设置的教室及日期。演示初始化设置当天码 `246810`。
+- `GET /admin/seat-statistics?from=&to=&classroomId=` → 按教室返回 `seatCount,reservedHours,usedHours,utilizationRate,cancelledCount,noShowCount,maintenanceHours`；仅ADMIN可访问，统计范围使用带偏移的 ISO 8601 时间。
 
 ### 管理员账号管理
 

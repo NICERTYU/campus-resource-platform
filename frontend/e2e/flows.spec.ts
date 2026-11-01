@@ -49,6 +49,7 @@ async function createRoom(page: Page) {
   return name
 }
 async function availability(page: Page, room: string, available: boolean) {
+  await page.clock.setFixedTime(new Date(fixedNow))
   await page.goto('/seats')
   await selectRoom(page, `${room} · 验收楼`)
   await page.getByRole('button', { name: '查询座位' }).click()
@@ -111,6 +112,8 @@ test('申请人提交、管理员批准、整室占用与撤销恢复', async ({
     .getByPlaceholder('说明活动、参与人数和使用需求')
     .fill('课程项目组讨论，需要整间教室')
   await page.getByRole('dialog').getByRole('button', { name: '提交申请' }).click()
+  // The workflow service uses wall time; only resource-seat fixtures use E2E_CLOCK.
+  await page.clock.setFixedTime(new Date())
   await expect(application(page, room)).toContainText('待审批')
   await login(page, 'admin')
   await page.goto('/applications')
@@ -142,6 +145,8 @@ test('M2退回补充、重提、终审退回初审及完整审批历史', async 
     .getByPlaceholder('说明活动、参与人数和使用需求')
     .fill('待补充的活动申请')
   await page.getByRole('dialog').getByRole('button', { name: '提交申请' }).click()
+  // The workflow service uses wall time; only resource-seat fixtures use E2E_CLOCK.
+  await page.clock.setFixedTime(new Date())
   await expect(application(page, room)).toContainText('待审批')
   await login(page, 'admin')
   await page.goto('/applications')

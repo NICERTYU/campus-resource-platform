@@ -40,6 +40,14 @@ M2 新申请使用两级审批及版本校验，完整状态矩阵、请求示�
 - 工单：`{id,classroomId,classroomName,reporterId,reporterName,technicianId,technicianName,description,status,note,comment,pendingAction,lastError}`。状态 `REPORTED,ASSIGNED,PROCESSING,IN_PROGRESS,AWAITING_ACCEPTANCE,ACCEPTED`。
 - 列表：管理员看全部，申请人仅自己，工单上报人或分派维修人员可查看。维修人员只能处理分派自己的工单。
 
+### M2 页面消费与错误反馈
+
+policy 的 steps 表示新建流程配置，已有记录的节点以自身 totalSteps/currentStep 为准。reviewSteps 与 legacyReview 来自当前账号的服务端策略；两级初审还须按记录 applicantDepartment 核对院系。策略请求失败时页面关闭审核操作，不回退成“ADMIN均可审批”。所有判定仍由后端最终校验。
+
+新两级记录示例：`{"id":101,"status":"PENDING","currentStep":2,"totalSteps":2,"revision":1,"approvalDeadline":"2026-10-28T09:00:00+08:00","applicantDepartment":"CS"}`；终审前仍未占用。策略示例：`{"steps":2,"timeout":"PT24H","reviewSteps":[2],"legacyReview":true}` 表示此账号只可操作两级流程的终审，旧单级记录另按legacyReview判断。
+
+审核/退回/重提使用用户确认时的revision。409后刷新并重新确认，不自动换版本重放。错误例：`{"code":"STATE_CONFLICT","message":"申请已被更新，请刷新后重新操作","requestId":"m2-conflict-example"}`。页面展示响应的真实requestId；PROCESSING的排障编号从对应revision的审批历史取得，不以客户端随机值冒充。客户端时钟到期只关闭审核并提示等待服务端确认，不能自行把状态写成EXPIRED。
+
 ## 内部接口
 
 只在容器网络提供，均必须带 `X-Module-Key`。环境变量 `MODULE_KEY`，至少32字符；浏览器无法通过公共 Nginx 访问内部接口。

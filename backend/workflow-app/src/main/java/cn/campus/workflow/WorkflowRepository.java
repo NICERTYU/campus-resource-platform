@@ -91,6 +91,52 @@ class WorkflowRepository {
         requestId);
   }
 
+  void history(
+      long id,
+      int step,
+      long revision,
+      String action,
+      User actor,
+      String comment,
+      String requestId,
+      OffsetDateTime at) {
+    db.update(
+        """
+        INSERT INTO application_history(application_id,step,revision,action,actor_id,actor_name,comment,request_id,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?)
+        """,
+        id,
+        step,
+        revision,
+        action,
+        actor == null ? null : actor.id(),
+        actor == null ? "系统" : actor.displayName(),
+        comment,
+        requestId,
+        at);
+  }
+
+  List<ApprovalHistory> history(User user, long id) {
+    var rows = db.queryForList("SELECT applicant_id FROM classroom_applications WHERE id=?", id);
+    if (rows.isEmpty()) throw new ApiException(404, "NOT_FOUND", "记录不存在");
+    if (!user.has("ADMIN") && number(rows.getFirst(), "applicant_id") != user.id())
+      throw ApiException.forbidden();
+    return db.query(
+        "SELECT * FROM application_history WHERE application_id=? ORDER BY id",
+        (r, n) ->
+            new ApprovalHistory(
+                r.getLong("id"),
+                r.getInt("step"),
+                r.getLong("revision"),
+                r.getString("action"),
+                r.getObject("actor_id", Long.class),
+                r.getString("actor_name"),
+                r.getString("comment"),
+                r.getString("request_id"),
+                time(r, "created_at")),
+        id);
+  }
+
   long intent(
       String type,
       long id,
@@ -137,7 +183,12 @@ class WorkflowRepository {
         r.getString("status"),
         r.getString("comment"),
         r.getString("pending_action"),
-        r.getString("last_error"));
+        r.getString("last_error"),
+        r.getInt("current_step"),
+        r.getInt("total_steps"),
+        r.getLong("revision"),
+        time(r, "approval_deadline"),
+        r.getString("applicant_department"));
   }
 
   RepairView repair(ResultSet r, int row) throws SQLException {

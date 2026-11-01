@@ -101,9 +101,13 @@ class OutboxProcessor {
     }
   }
 
-  private void finish(Intent intent, ApiException error) {
+  private void finish(Intent intent, ApiException suppliedError) {
     tx.executeWithoutResult(
         status -> {
+          ApiException error = suppliedError;
+          // All paths lock the business record before an intent: expiry/withdrawal uses this order
+          // too.
+          var business = repo.locked(intent.type(), intent.sourceId());
           var rows =
               repo.jdbc()
                   .queryForList(
@@ -112,8 +116,30 @@ class OutboxProcessor {
                       intent.id(),
                       intent.attemptToken());
           if (rows.isEmpty()) return;
+          if (number(business, "source_version") != intent.version()
+              || !"PROCESSING".equals(string(business, "status"))
+              || !intent.action().equals(string(business, "pending_action"))) {
+            repo.jdbc()
+                .update(
+                    "UPDATE outbox SET status='SUPERSEDED',lease_until=NULL WHERE id=?",
+                    intent.id());
+            return;
+          }
           String table = repo.table(intent.type());
-          if (error != null && error.status >= 500) {
+          boolean approvalExpired =
+              intent.type().equals("M2")
+                  && intent.action().equals("APPROVE")
+                  && !time(business, "approval_deadline").toInstant().isAfter(clock.instant());
+          if (approvalExpired && error == null) error = ApiException.conflict("审批期限已到，等待解除资源占用");
+          boolean m2Retry =
+              intent.type().equals("M2")
+                  && (intent.action().equals("EXPIRE")
+                      || intent.action().equals("WITHDRAW")
+                      || (intent.action().equals("APPROVE")
+                          && number(business, "total_steps") > 1
+                          && error != null
+                          && error.status == 409));
+          if (error != null && (error.status >= 500 || m2Retry || approvalExpired)) {
             repo.jdbc()
                 .update(
                     "UPDATE outbox SET"

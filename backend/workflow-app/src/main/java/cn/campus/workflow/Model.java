@@ -30,6 +30,24 @@ final class Model {
 
   record CommentInput(String comment) {}
 
+  record ReviewInput(String comment, Long revision) {}
+
+  record ResubmitInput(String purpose, Long revision) {}
+
+  record ApprovalPolicyView(
+      int steps, String timeout, List<Integer> reviewSteps, boolean legacyReview) {}
+
+  record ApprovalHistory(
+      long id,
+      int step,
+      long revision,
+      String action,
+      Long actorId,
+      String actorName,
+      String comment,
+      String requestId,
+      OffsetDateTime createdAt) {}
+
   record AssignmentInput(Long technicianId) {}
 
   record CompletionInput(String note) {}
@@ -46,7 +64,12 @@ final class Model {
       String status,
       String comment,
       String pendingAction,
-      String lastError) {}
+      String lastError,
+      int currentStep,
+      int totalSteps,
+      long revision,
+      OffsetDateTime approvalDeadline,
+      String applicantDepartment) {}
 
   record RepairView(
       long id,

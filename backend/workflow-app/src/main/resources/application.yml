@@ -16,6 +16,12 @@ workflow:
   resource-url: ${RESOURCE_URL:http://localhost:8081}
   module-key: ${MODULE_KEY}
   retry-delay-ms: ${RETRY_DELAY_MS:5000}
+  approval:
+    steps: ${WORKFLOW_APPROVAL_STEPS:2}
+    timeout: ${M2_APPROVAL_TIMEOUT:PT24H}
+    first-reviewer-ids: ${M2_FIRST_REVIEWER_IDS:}
+    final-reviewer-ids: ${M2_FINAL_REVIEWER_IDS:}
+    expiry-scan-ms: ${M2_EXPIRY_SCAN_MS:5000}
 management:
   endpoints:
     web:

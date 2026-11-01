@@ -49,6 +49,7 @@ async function createRoom(page: Page) {
   return name
 }
 async function availability(page: Page, room: string, available: boolean) {
+  await page.clock.setFixedTime(new Date(fixedNow))
   await page.goto('/seats')
   await selectRoom(page, `${room} · 验收楼`)
   await page.getByRole('button', { name: '查询座位' }).click()
@@ -111,9 +112,15 @@ test('申请人提交、管理员批准、整室占用与撤销恢复', async ({
     .getByPlaceholder('说明活动、参与人数和使用需求')
     .fill('课程项目组讨论，需要整间教室')
   await page.getByRole('dialog').getByRole('button', { name: '提交申请' }).click()
+  // The workflow service uses wall time; only resource-seat fixtures use E2E_CLOCK.
+  await page.clock.setFixedTime(new Date())
   await expect(application(page, room)).toContainText('待审批')
   await login(page, 'admin')
   await page.goto('/applications')
+  await application(page, room).getByRole('button', { name: '通过申请' }).click()
+  await page.getByRole('dialog').getByRole('button', { name: '确认通过', exact: true }).click()
+  await expect(application(page, room)).toContainText('审批节点：2 / 2')
+  await expect(application(page, room)).toContainText('待审批')
   await application(page, room).getByRole('button', { name: '通过申请' }).click()
   await page.getByRole('dialog').getByRole('button', { name: '确认通过', exact: true }).click()
   await expect(application(page, room)).toContainText('已通过')
@@ -127,6 +134,52 @@ test('申请人提交、管理员批准、整室占用与撤销恢复', async ({
   await login(page, 'student')
   await availability(page, room, true)
 })
+test('M2退回补充、重提、终审退回初审及完整审批历史', async ({ page }) => {
+  const room = await createRoom(page)
+  await login(page, 'applicant')
+  await page.goto('/applications')
+  await page.getByRole('button', { name: '新建申请' }).click()
+  await selectRoom(page, room, true)
+  await page
+    .getByRole('dialog')
+    .getByPlaceholder('说明活动、参与人数和使用需求')
+    .fill('待补充的活动申请')
+  await page.getByRole('dialog').getByRole('button', { name: '提交申请' }).click()
+  // The workflow service uses wall time; only resource-seat fixtures use E2E_CLOCK.
+  await page.clock.setFixedTime(new Date())
+  await expect(application(page, room)).toContainText('待审批')
+  await login(page, 'admin')
+  await page.goto('/applications')
+  await application(page, room).getByRole('button', { name: '退回', exact: true }).click()
+  await page.getByRole('dialog').locator('textarea').fill('请补充活动用途')
+  await page.getByRole('dialog').getByRole('button', { name: '确认退回', exact: true }).click()
+  await expect(application(page, room)).toContainText('待补充重提')
+  await login(page, 'applicant')
+  await page.goto('/applications')
+  await application(page, room).getByRole('button', { name: '补充重提' }).click()
+  await page.getByRole('dialog').locator('textarea').fill('课程讨论，参加人数20人')
+  await page.getByRole('dialog').getByRole('button', { name: '确认重新提交', exact: true }).click()
+  await expect(application(page, room)).toContainText('待审批')
+  await login(page, 'admin')
+  await page.goto('/applications')
+  await application(page, room).getByRole('button', { name: '通过申请' }).click()
+  await page.getByRole('dialog').getByRole('button', { name: '确认通过', exact: true }).click()
+  await expect(application(page, room)).toContainText('审批节点：2 / 2')
+  await application(page, room).getByRole('button', { name: '退回', exact: true }).click()
+  await page.getByRole('dialog').locator('textarea').fill('请初审再次核实')
+  await page.getByRole('dialog').getByRole('button', { name: '确认退回', exact: true }).click()
+  await expect(application(page, room)).toContainText('审批节点：1 / 2')
+  for (let step = 1; step <= 2; step++) {
+    await application(page, room).getByRole('button', { name: '通过申请' }).click()
+    await page.getByRole('dialog').getByRole('button', { name: '确认通过', exact: true }).click()
+    await expect(application(page, room)).toContainText(step === 1 ? '审批节点：2 / 2' : '已通过')
+  }
+  await application(page, room).getByRole('button', { name: '审批记录' }).click()
+  await expect(page.getByRole('dialog')).toContainText('请补充活动用途')
+  await expect(page.getByRole('dialog')).toContainText('课程讨论，参加人数20人')
+  await expect(page.getByRole('dialog')).toContainText('请初审再次核实')
+})
+
 test('学生报修、管理员派单、维修完工和返修验收恢复', async ({ page }) => {
   const room = await createRoom(page)
   const description = `${room} 插座无法供电，请检查`

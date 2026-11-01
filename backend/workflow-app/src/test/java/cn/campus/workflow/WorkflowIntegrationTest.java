@@ -69,12 +69,15 @@ class WorkflowIntegrationTest {
         "workflow.resource-url", () -> "http://localhost:" + RESOURCE.getAddress().getPort());
     registry.add("workflow.module-key", () -> MODULE_KEY);
     registry.add("workflow.retry-delay-ms", () -> "3600000");
+    registry.add("workflow.approval.steps", () -> "1");
+    registry.add("workflow.approval.expiry-scan-ms", () -> "3600000");
   }
 
   @BeforeEach
   void clean() {
     db.execute(
-        "TRUNCATE idempotency_results,outbox,audit_logs,classroom_applications,repair_orders"
+        "TRUNCATE"
+            + " application_history,idempotency_results,outbox,audit_logs,classroom_applications,repair_orders"
             + " RESTART IDENTITY");
     REMOTE_STATUS.set(200);
     COMMANDS.set(0);

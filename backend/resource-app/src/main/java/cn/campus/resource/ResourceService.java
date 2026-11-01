@@ -471,11 +471,19 @@ class ResourceService {
     db.update(
         "INSERT INTO reservation_notifications(reservation_id,user_id,type,scheduled_at,created_at)"
             + " VALUES(?,?,?,?,?) ON CONFLICT(reservation_id,type) DO NOTHING",
-        reservationId, userId, "PRE_START_REMINDER", start.minus(Duration.ofMinutes(15)), stamp(created));
+        reservationId,
+        userId,
+        "PRE_START_REMINDER",
+        stamp(start.minus(Duration.ofMinutes(15))),
+        stamp(created));
     db.update(
         "INSERT INTO reservation_notifications(reservation_id,user_id,type,scheduled_at,created_at)"
             + " VALUES(?,?,?,?,?) ON CONFLICT(reservation_id,type) DO NOTHING",
-        reservationId, userId, "NO_SHOW_WARNING", start.plus(Duration.ofMinutes(10)), stamp(created));
+        reservationId,
+        userId,
+        "NO_SHOW_WARNING",
+        stamp(start.plus(Duration.ofMinutes(10))),
+        stamp(created));
   }
 
   Object cancel(User actor, long id, String key, String requestId) {

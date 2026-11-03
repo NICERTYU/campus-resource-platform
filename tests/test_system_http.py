@@ -203,7 +203,7 @@ class SystemHttpAcceptance(unittest.TestCase):
         self.assertEqual(self.applicant.request("POST", "/classroom-applications/%s/withdraw" % application["id"], {})[0], 200)
         self.assertTrue(all(seat["available"] for seat in self.availability()))
 
-    def test_T04_completion_and_return_keep_repair_restriction(self):
+    def test_T04_M3_return_acceptance_and_reporter_review(self):
         repair = self.repair()
         path = "/repair-orders/%s" % repair["id"]
         self.assertEqual(self.technician.request("POST", path + "/complete", {"note": "提交"})[0], 200)
@@ -213,6 +213,26 @@ class SystemHttpAcceptance(unittest.TestCase):
         self.assertEqual(returned["status"], "IN_PROGRESS")
         self.assertTrue(all(not seat["available"] for seat in self.availability()))
         self.accept(repair)
+        self.assertTrue(all(seat["available"] for seat in self.availability()))
+        review_path = path + "/review"
+        body = {"rating": 5, "comment": "返修后修复完成"}
+        self.assertEqual(self.student2.request("POST", review_path, body)[0], 403)
+        status, review = self.student.request("POST", review_path, body, key="review-" + self.prefix)
+        self.assertEqual(status, 201, review)
+        self.assertEqual(review["reviewerId"], self.student.user["id"])
+        self.assertEqual(self.student.request("POST", review_path, body, key="review-" + self.prefix), (201, review))
+        self.assertEqual(self.student.request("POST", review_path, body, key="other-" + self.prefix)[0], 409)
+        self.assertTrue(all(seat["available"] for seat in self.availability()))
+
+    def test_M3_two_repairs_keep_seats_unavailable_until_last_acceptance(self):
+        first, second = self.repair(), self.repair()
+        self.assertTrue(all(not seat["available"] for seat in self.availability()))
+        self.accept(first)
+        self.assertTrue(all(not seat["available"] for seat in self.availability()))
+        status, result = self.student.request("POST", "/repair-orders/%s/review" % first["id"], {"rating": 4})
+        self.assertEqual(status, 201, result)
+        self.assertTrue(all(not seat["available"] for seat in self.availability()))
+        self.accept(second)
         self.assertTrue(all(seat["available"] for seat in self.availability()))
 
     def test_T08_roles_ownership_csrf_and_department(self):

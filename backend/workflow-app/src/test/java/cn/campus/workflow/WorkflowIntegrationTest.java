@@ -53,6 +53,8 @@ class WorkflowIntegrationTest {
   @Autowired WorkflowRepository repository;
   @Autowired ResourceClient resourceClient;
   @Autowired TransactionTemplate transactions;
+  @Autowired RepairEscalationService escalation;
+  @Autowired RepairTimeoutScanner repairScanner;
   private final HttpClient browser = HttpClient.newHttpClient();
 
   @AfterAll
@@ -69,6 +71,7 @@ class WorkflowIntegrationTest {
         "workflow.resource-url", () -> "http://localhost:" + RESOURCE.getAddress().getPort());
     registry.add("workflow.module-key", () -> MODULE_KEY);
     registry.add("workflow.retry-delay-ms", () -> "3600000");
+    registry.add("workflow.repair.scan-ms", () -> "3600000");
     registry.add("workflow.approval.steps", () -> "1");
     registry.add("workflow.approval.expiry-scan-ms", () -> "3600000");
   }
@@ -77,7 +80,7 @@ class WorkflowIntegrationTest {
   void clean() {
     db.execute(
         "TRUNCATE"
-            + " application_history,idempotency_results,outbox,audit_logs,classroom_applications,repair_orders"
+            + " repair_reviews,repair_escalations,repair_history,application_history,idempotency_results,outbox,audit_logs,classroom_applications,repair_orders"
             + " RESTART IDENTITY");
     REMOTE_STATUS.set(200);
     COMMANDS.set(0);
@@ -463,6 +466,718 @@ class WorkflowIntegrationTest {
             .asText());
     assertFalse(RESTRICTIONS.get("M3/" + id).path("active").asBoolean());
     assertEquals(2, RESTRICTIONS.get("M3/" + id).path("version").asInt());
+  }
+
+  long reportedRepair() throws Exception {
+    return parse(
+            call(
+                "POST",
+                "/repair-orders",
+                Map.of("classroomId", 1, "description", "M3专项故障"),
+                "student",
+                null,
+                true))
+        .path("id")
+        .asLong();
+  }
+
+  @Test
+  void m3NewRepairsPersistConfiguredDeadlineAndIdempotentCreationKeepsIt() throws Exception {
+    var body = Map.of("classroomId", 1, "description", "期限验证");
+    var response = call("POST", "/repair-orders", body, "student", "deadline-create", true);
+    assertEquals(201, response.statusCode());
+    var record = parse(response);
+    var created = java.time.OffsetDateTime.parse(record.path("createdAt").asText());
+    var deadline = java.time.OffsetDateTime.parse(record.path("repairDeadline").asText());
+    assertEquals(java.time.Duration.ofHours(24), java.time.Duration.between(created, deadline));
+    assertEquals(
+        response.body(),
+        call("POST", "/repair-orders", body, "student", "deadline-create", true).body());
+    assertEquals(
+        deadline.toInstant(),
+        db.queryForObject(
+                "SELECT repair_deadline FROM repair_orders WHERE id=?",
+                java.time.OffsetDateTime.class,
+                record.path("id").asLong())
+            .toInstant());
+  }
+
+  @Test
+  void m3TimeoutBoundaryIsIdempotentAndKeepsRepairAndRestrictionVersions() throws Exception {
+    long id = reportedRepair();
+    assignRepair(id);
+    call("POST", "/repair-orders/" + id + "/start", Map.of(), "tech", null, true);
+    var deadline = java.time.OffsetDateTime.parse("2026-11-03T01:00:00Z");
+    db.update("UPDATE repair_orders SET repair_deadline=? WHERE id=?", deadline, id);
+    var before =
+        db.queryForMap(
+            "SELECT status,source_version,restriction_start,pending_action FROM repair_orders WHERE"
+                + " id=?",
+            id);
+    var policy = new RepairTimeoutPolicy(java.time.Duration.ofHours(1), 1000);
+    var earlier =
+        new RepairEscalationService(
+            repository,
+            transactions,
+            policy,
+            java.time.Clock.fixed(deadline.toInstant().minusNanos(1000), java.time.ZoneOffset.UTC));
+    assertFalse(earlier.escalate(id));
+    var atBoundary =
+        new RepairEscalationService(
+            repository,
+            transactions,
+            policy,
+            java.time.Clock.fixed(deadline.toInstant(), java.time.ZoneOffset.UTC));
+    assertTrue(atBoundary.escalate(id));
+    assertFalse(atBoundary.escalate(id));
+    assertEquals(
+        before,
+        db.queryForMap(
+            "SELECT status,source_version,restriction_start,pending_action FROM repair_orders WHERE"
+                + " id=?",
+            id));
+    assertTrue(RESTRICTIONS.get("M3/" + id).path("active").asBoolean());
+    assertEquals(1, COMMANDS.get());
+    var event = db.queryForMap("SELECT * FROM repair_escalations WHERE repair_id=?", id);
+    assertEquals("AVAILABLE", event.get("notification_status"));
+    assertNotNull(event.get("request_id"));
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
+  }
+
+  @Test
+  void m3EscalationRechecksCompletedStateAndRecoversLegacyDeadlineAfterRestart() throws Exception {
+    long id = reportedRepair();
+    var start = java.time.OffsetDateTime.parse("2026-11-01T00:00:00Z");
+    db.update("UPDATE repair_orders SET created_at=?,repair_deadline=NULL WHERE id=?", start, id);
+    var fixed = java.time.Clock.fixed(start.plusHours(2).toInstant(), java.time.ZoneOffset.UTC);
+    var oneHour = new RepairTimeoutPolicy(java.time.Duration.ofHours(1), 1000);
+    var restarted = new RepairEscalationService(repository, transactions, oneHour, fixed);
+    assertTrue(restarted.escalate(id));
+    var saved =
+        db.queryForObject(
+            "SELECT repair_deadline FROM repair_orders WHERE id=?",
+            java.time.OffsetDateTime.class,
+            id);
+    assertEquals(start.plusHours(1).toInstant(), saved.toInstant());
+    assertFalse(
+        new RepairEscalationService(
+                repository,
+                transactions,
+                new RepairTimeoutPolicy(java.time.Duration.ofDays(7), 1000),
+                fixed)
+            .escalate(id));
+    assertEquals(
+        saved,
+        db.queryForObject(
+            "SELECT repair_deadline FROM repair_orders WHERE id=?",
+            java.time.OffsetDateTime.class,
+            id));
+    for (String state : java.util.List.of("AWAITING_ACCEPTANCE", "ACCEPTED", "PROCESSING")) {
+      long done = reportedRepair();
+      db.update(
+          "UPDATE repair_orders SET status=?,pending_action='ACCEPT',repair_deadline=? WHERE id=?",
+          state,
+          start,
+          done);
+      assertFalse(restarted.escalate(done));
+    }
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
+  }
+
+  @Test
+  void m3ConcurrentEscalationsPersistExactlyOneAdministratorReminder() throws Exception {
+    long id = reportedRepair();
+    db.update(
+        "UPDATE repair_orders SET repair_deadline=CURRENT_TIMESTAMP-INTERVAL '1 day' WHERE id=?",
+        id);
+    var barrier = new java.util.concurrent.CyclicBarrier(4);
+    try (var pool = java.util.concurrent.Executors.newFixedThreadPool(4)) {
+      var futures = new java.util.ArrayList<java.util.concurrent.Future<Boolean>>();
+      for (int i = 0; i < 4; i++)
+        futures.add(
+            pool.submit(
+                () -> {
+                  barrier.await();
+                  return escalation.escalate(id);
+                }));
+      int changed = 0;
+      for (var f : futures) if (f.get()) changed++;
+      assertEquals(1, changed);
+    }
+    assertEquals(
+        1,
+        db.queryForObject(
+            "SELECT count(*) FROM repair_escalations WHERE repair_id=?", Integer.class, id));
+    assertEquals(
+        "REPORTED",
+        db.queryForObject("SELECT status FROM repair_orders WHERE id=?", String.class, id));
+    assertEquals(0, COMMANDS.get());
+  }
+
+  @Test
+  void m3FailedReminderPersistenceRollsBackAndCanRetry() throws Exception {
+    long id = reportedRepair();
+    db.update(
+        "UPDATE repair_orders SET created_at=CURRENT_TIMESTAMP-INTERVAL '2"
+            + " days',repair_deadline=NULL WHERE id=?",
+        id);
+    db.execute(
+        "CREATE FUNCTION fail_reminder() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE"
+            + " EXCEPTION 'reminder failure'; END $$");
+    db.execute(
+        "CREATE TRIGGER fail_reminder BEFORE INSERT ON repair_escalations FOR EACH ROW EXECUTE"
+            + " FUNCTION fail_reminder()");
+    try {
+      assertThrows(
+          org.springframework.dao.DataAccessException.class, () -> escalation.escalate(id));
+      assertNull(
+          db.queryForObject(
+              "SELECT repair_deadline FROM repair_orders WHERE id=?",
+              java.time.OffsetDateTime.class,
+              id));
+      assertEquals(0, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
+      assertEquals(
+          "REPORTED",
+          db.queryForObject("SELECT status FROM repair_orders WHERE id=?", String.class, id));
+    } finally {
+      db.execute("DROP TRIGGER fail_reminder ON repair_escalations");
+      db.execute("DROP FUNCTION fail_reminder()");
+    }
+    assertTrue(escalation.escalate(id));
+  }
+
+  @Test
+  void m3ScannerPersistsReminderOnceAndInboxRequiresAdministrator() throws Exception {
+    long id = reportedRepair();
+    long ended = reportedRepair();
+    db.update("UPDATE repair_orders SET repair_deadline=CURRENT_TIMESTAMP-INTERVAL '1 day'");
+    db.update("UPDATE repair_orders SET status='AWAITING_ACCEPTANCE' WHERE id=?", ended);
+    repairScanner.scan();
+    repairScanner.scan();
+    var events = parse(call("GET", "/repair-orders/escalations", null, "admin", null, false));
+    assertEquals(1, events.size());
+    assertEquals(id, events.get(0).path("repairId").asLong());
+    assertEquals("AVAILABLE", events.get(0).path("notificationStatus").asText());
+    assertEquals(
+        403, call("GET", "/repair-orders/escalations", null, "student", null, false).statusCode());
+    assertEquals(
+        403, call("GET", "/repair-orders/escalations", null, "tech", null, false).statusCode());
+    assertEquals(
+        401, call("GET", "/repair-orders/escalations", null, null, null, false).statusCode());
+    assertEquals(
+        400,
+        call("GET", "/repair-orders/escalations?page=0", null, "admin", null, false).statusCode());
+    assertEquals(
+        0,
+        parse(
+                call(
+                    "GET",
+                    "/repair-orders/escalations?page=2&pageSize=1",
+                    null,
+                    "admin",
+                    null,
+                    false))
+            .size());
+    assertEquals(0, COMMANDS.get());
+  }
+
+  @Test
+  void m3ScannerFailureCannotStarveLaterPagesAndFreshScannerRecovers() {
+    db.update(
+        """
+        INSERT INTO repair_orders(classroom_id,classroom_name,reporter_id,reporter_name,description,status,repair_deadline)
+        SELECT 1,'A101',1,'student','scan','REPORTED',CURRENT_TIMESTAMP-INTERVAL '1 day'
+        FROM generate_series(1,101)
+        """);
+    db.execute(
+        "CREATE FUNCTION fail_first_reminder() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF"
+            + " NEW.repair_id=1 THEN RAISE EXCEPTION 'first reminder failure'; END IF; RETURN NEW;"
+            + " END $$");
+    db.execute(
+        "CREATE TRIGGER fail_first_reminder BEFORE INSERT ON repair_escalations FOR EACH ROW"
+            + " EXECUTE FUNCTION fail_first_reminder()");
+    try {
+      repairScanner.scan();
+      assertEquals(
+          100, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
+      assertEquals(
+          1,
+          db.queryForObject(
+              "SELECT count(*) FROM repair_escalations WHERE repair_id=101", Integer.class));
+      repairScanner.scan();
+      assertEquals(
+          100, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
+    } finally {
+      db.execute("DROP TRIGGER fail_first_reminder ON repair_escalations");
+      db.execute("DROP FUNCTION fail_first_reminder()");
+    }
+    new RepairTimeoutScanner(repository, escalation, java.time.Clock.systemUTC()).scan();
+    assertEquals(101, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
+  }
+
+  @Test
+  void m3CompletionWinningRowLockPreventsEscalationFromStaleCandidate() throws Exception {
+    long id = reportedRepair();
+    assignRepair(id);
+    call("POST", "/repair-orders/" + id + "/start", Map.of(), "tech", null, true);
+    db.update(
+        "UPDATE repair_orders SET repair_deadline=CURRENT_TIMESTAMP-INTERVAL '1 day' WHERE id=?",
+        id);
+    try (var pool = java.util.concurrent.Executors.newSingleThreadExecutor()) {
+      var future =
+          new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.Future<Boolean>>();
+      transactions.executeWithoutResult(
+          status -> {
+            repository.locked("M3", id);
+            future.set(pool.submit(() -> escalation.escalate(id)));
+            db.update("UPDATE repair_orders SET status='AWAITING_ACCEPTANCE' WHERE id=?", id);
+          });
+      assertFalse(future.get().get(10, java.util.concurrent.TimeUnit.SECONDS));
+    }
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
+    assertTrue(RESTRICTIONS.get("M3/" + id).path("active").asBoolean());
+  }
+
+  long acceptedRepair() throws Exception {
+    long id = reportedRepair();
+    assignRepair(id);
+    String path = "/repair-orders/" + id;
+    assertEquals(200, call("POST", path + "/start", Map.of(), "tech", null, true).statusCode());
+    assertEquals(
+        200,
+        call("POST", path + "/complete", Map.of("note", "修复完成"), "tech", null, true).statusCode());
+    assertEquals(
+        "ACCEPTED",
+        parse(call("POST", path + "/accept", Map.of(), "admin", null, true))
+            .path("status")
+            .asText());
+    return id;
+  }
+
+  @Test
+  void m3ReviewRequiresReporterAndFinalAcceptanceForEveryPrematureState() throws Exception {
+    long id = reportedRepair();
+    String path = "/repair-orders/" + id + "/review";
+    var body = Map.of("rating", 5, "comment", "满意");
+    assertEquals(204, call("GET", path, null, "student", null, false).statusCode());
+    for (String state :
+        java.util.List.of(
+            "REPORTED", "ASSIGNED", "IN_PROGRESS", "AWAITING_ACCEPTANCE", "PROCESSING")) {
+      db.update("UPDATE repair_orders SET status=? WHERE id=?", state, id);
+      assertEquals(409, call("POST", path, body, "student", null, true).statusCode());
+    }
+    db.update("UPDATE repair_orders SET status='ACCEPTED' WHERE id=?", id);
+    assertEquals(401, call("POST", path, body, null, null, true).statusCode());
+    assertEquals(403, call("POST", path, body, "student", null, false).statusCode());
+    for (String actor : java.util.List.of("admin", "other", "tech")) {
+      assertEquals(403, call("POST", path, body, actor, null, true).statusCode());
+    }
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM repair_reviews", Integer.class));
+  }
+
+  @Test
+  void m3ReviewValidatesScoreAndTextAndReplaysOnlyTheSameIdempotentRequest() throws Exception {
+    long id = acceptedRepair();
+    String path = "/repair-orders/" + id + "/review";
+    for (Number rating : java.util.List.of(0, 6, 1.5))
+      assertEquals(
+          400, call("POST", path, Map.of("rating", rating), "student", null, true).statusCode());
+    assertEquals(
+        400,
+        call("POST", path, Map.of("rating", 5, "comment", "a".repeat(1001)), "student", null, true)
+            .statusCode());
+    assertEquals(
+        400, call("POST", path, Map.of("comment", "缺评分"), "student", null, true).statusCode());
+    var before =
+        db.queryForMap(
+            "SELECT status,source_version,restriction_start FROM repair_orders WHERE id=?", id);
+    var body = Map.of("rating", 5, "comment", "维修及时");
+    var first = call("POST", path, body, "student", "review-key", true);
+    assertEquals(201, first.statusCode());
+    assertEquals(1, parse(first).path("reviewerId").asLong());
+    assertTrue(parse(first).hasNonNull("reviewedAt"));
+    assertEquals(first.body(), call("POST", path, body, "student", "review-key", true).body());
+    assertEquals(
+        "IDEMPOTENCY_CONFLICT",
+        parse(call("POST", path, Map.of("rating", 1), "student", "review-key", true))
+            .path("code")
+            .asText());
+    assertEquals(409, call("POST", path, body, "student", "another-key", true).statusCode());
+    assertEquals(first.body(), call("GET", path, null, "student", null, false).body());
+    assertEquals(200, call("GET", path, null, "admin", null, false).statusCode());
+    assertEquals(403, call("GET", path, null, "other", null, false).statusCode());
+    assertEquals(403, call("GET", path, null, "tech", null, false).statusCode());
+    assertEquals(
+        before,
+        db.queryForMap(
+            "SELECT status,source_version,restriction_start FROM repair_orders WHERE id=?", id));
+    assertEquals(2, COMMANDS.get());
+    assertEquals(
+        1,
+        db.queryForObject("SELECT count(*) FROM audit_logs WHERE action='REVIEW'", Integer.class));
+    assertThrows(
+        org.springframework.dao.DataIntegrityViolationException.class,
+        () ->
+            db.update(
+                "INSERT INTO repair_reviews SELECT"
+                    + " repair_id,reviewer_id,rating,comment,'duplicate',reviewed_at FROM"
+                    + " repair_reviews WHERE repair_id=?",
+                id));
+  }
+
+  @Test
+  void m3ConcurrentReviewsHaveOneWinnerAndSameKeyRetriesReplayExactly() throws Exception {
+    for (boolean sameKey : java.util.List.of(false, true)) {
+      long id = acceptedRepair();
+      var barrier = new java.util.concurrent.CyclicBarrier(2);
+      try (var pool = java.util.concurrent.Executors.newFixedThreadPool(2)) {
+        var a =
+            pool.submit(
+                () -> {
+                  barrier.await();
+                  return call(
+                      "POST",
+                      "/repair-orders/" + id + "/review",
+                      Map.of("rating", 4),
+                      "student",
+                      "key-a",
+                      true);
+                });
+        var b =
+            pool.submit(
+                () -> {
+                  barrier.await();
+                  return call(
+                      "POST",
+                      "/repair-orders/" + id + "/review",
+                      Map.of("rating", 4),
+                      "student",
+                      sameKey ? "key-a" : "key-b",
+                      true);
+                });
+        var first = a.get();
+        var second = b.get();
+        if (sameKey) {
+          assertEquals(201, first.statusCode());
+          assertEquals(first.body(), second.body());
+        } else
+          assertEquals(
+              java.util.Set.of(201, 409),
+              java.util.Set.of(first.statusCode(), second.statusCode()));
+      }
+      assertEquals(
+          1,
+          db.queryForObject(
+              "SELECT count(*) FROM repair_reviews WHERE repair_id=?", Integer.class, id));
+      assertEquals(
+          1,
+          db.queryForObject(
+              "SELECT count(*) FROM audit_logs WHERE source_type='M3' AND source_id=? AND"
+                  + " action='REVIEW'",
+              Integer.class,
+              id));
+    }
+  }
+
+  @Test
+  void m3ReviewAuditFailureRollsBackEvaluationAndAllowsRetry() throws Exception {
+    long id = acceptedRepair();
+    db.execute(
+        "CREATE FUNCTION fail_review_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF"
+            + " NEW.action='REVIEW' THEN RAISE EXCEPTION 'review audit failure'; END IF; RETURN"
+            + " NEW; END $$");
+    db.execute(
+        "CREATE TRIGGER fail_review_audit BEFORE INSERT ON audit_logs FOR EACH ROW EXECUTE FUNCTION"
+            + " fail_review_audit()");
+    try {
+      assertEquals(
+          500,
+          call(
+                  "POST",
+                  "/repair-orders/" + id + "/review",
+                  Map.of("rating", 5),
+                  "student",
+                  "retry-audit",
+                  true)
+              .statusCode());
+      assertEquals(0, db.queryForObject("SELECT count(*) FROM repair_reviews", Integer.class));
+      assertEquals(
+          "ACCEPTED",
+          db.queryForObject("SELECT status FROM repair_orders WHERE id=?", String.class, id));
+    } finally {
+      db.execute("DROP TRIGGER fail_review_audit ON audit_logs");
+      db.execute("DROP FUNCTION fail_review_audit()");
+    }
+    assertEquals(
+        201,
+        call(
+                "POST",
+                "/repair-orders/" + id + "/review",
+                Map.of("rating", 5),
+                "student",
+                "retry-audit",
+                true)
+            .statusCode());
+  }
+
+  @Test
+  void m3LegacyAssignmentFingerprintStillReplaysAfterRequestFieldsExpand() throws Exception {
+    long id = reportedRepair();
+    var input = Map.of("technicianId", 4);
+    var original =
+        call("POST", "/repair-orders/" + id + "/assign", input, "admin", "legacy-assignment", true);
+    assertEquals(200, original.statusCode());
+    String oldSignature =
+        java.util.HexFormat.of()
+            .formatHex(
+                java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(
+                        JSON.writeValueAsString(input)
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    db.update(
+        "UPDATE idempotency_results SET signature=? WHERE actor_id=3 AND action=? AND"
+            + " request_key='legacy-assignment'",
+        oldSignature,
+        "M3:" + id + ":assign");
+    var replay =
+        call("POST", "/repair-orders/" + id + "/assign", input, "admin", "legacy-assignment", true);
+    assertEquals(200, replay.statusCode());
+    assertEquals(original.body(), replay.body());
+    assertEquals(
+        1,
+        db.queryForObject(
+            "SELECT count(*) FROM repair_history WHERE repair_id=?", Integer.class, id));
+  }
+
+  @Test
+  void m3LockedRepairCannotBlockUnrelatedOverdueWork() throws Exception {
+    long busy = reportedRepair();
+    long peer = reportedRepair();
+    db.update("UPDATE repair_orders SET repair_deadline=CURRENT_TIMESTAMP-INTERVAL '1 day'");
+    try (var pool = java.util.concurrent.Executors.newSingleThreadExecutor()) {
+      transactions.executeWithoutResult(
+          status -> {
+            repository.locked("M3", busy);
+            var scan = pool.submit(() -> repairScanner.scan());
+            try {
+              scan.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (Exception error) {
+              throw new RuntimeException("A locked repair blocked its peer", error);
+            }
+            assertEquals(
+                1,
+                db.queryForObject(
+                    "SELECT count(*) FROM repair_escalations WHERE repair_id=?",
+                    Integer.class,
+                    peer));
+            assertEquals(
+                0,
+                db.queryForObject(
+                    "SELECT count(*) FROM repair_escalations WHERE repair_id=?",
+                    Integer.class,
+                    busy));
+          });
+    }
+    repairScanner.scan();
+    assertEquals(2, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
+  }
+
+  void assignRepair(long id) throws Exception {
+    assertEquals(
+        200,
+        call(
+                "POST",
+                "/repair-orders/" + id + "/assign",
+                Map.of("technicianId", 4),
+                "admin",
+                null,
+                true)
+            .statusCode());
+  }
+
+  @Test
+  void m3ReassignmentKeepsHistoryRejectsStaleOwnerAndRevokesOldTechnician() throws Exception {
+    long id = reportedRepair();
+    assignRepair(id);
+    String path = "/repair-orders/" + id;
+    assertEquals(
+        400,
+        call("POST", path + "/assign", Map.of("technicianId", 6), "admin", null, true)
+            .statusCode());
+    var body = Map.of("technicianId", 6, "expectedTechnicianId", 4, "reason", "人员调度");
+    assertEquals(403, call("POST", path + "/assign", body, "student", null, true).statusCode());
+    var first = call("POST", path + "/assign", body, "admin", "reassign-key", true);
+    assertEquals(200, first.statusCode());
+    assertEquals(
+        first.body(), call("POST", path + "/assign", body, "admin", "reassign-key", true).body());
+    assertEquals(409, call("POST", path + "/assign", body, "admin", null, true).statusCode());
+    assertEquals(403, call("POST", path + "/start", Map.of(), "tech", null, true).statusCode());
+    assertEquals(403, call("GET", path + "/history", null, "other", null, false).statusCode());
+    assertEquals(403, call("GET", path + "/history", null, "tech", null, false).statusCode());
+    var history = parse(call("GET", path + "/history", null, "student", null, false));
+    assertEquals(2, history.size());
+    assertEquals("REASSIGN", history.get(1).path("action").asText());
+    assertEquals(4, history.get(1).path("previousTechnicianId").asLong());
+    assertEquals(6, history.get(1).path("technicianId").asLong());
+    assertEquals("人员调度", history.get(1).path("reason").asText());
+    assertTrue(history.get(1).hasNonNull("createdAt"));
+    assertEquals(
+        "IN_PROGRESS",
+        parse(call("POST", path + "/start", Map.of(), "othertech", null, true))
+            .path("status")
+            .asText());
+    assertEquals(409, call("POST", path + "/assign", body, "admin", null, true).statusCode());
+    assertEquals(1, COMMANDS.get());
+  }
+
+  @Test
+  void m3ReturnRequiresServerSideReasonAndRetainsEveryReasonWithoutReleasingSeats()
+      throws Exception {
+    long id = reportedRepair();
+    assignRepair(id);
+    String path = "/repair-orders/" + id;
+    call("POST", path + "/start", Map.of(), "tech", null, true);
+    for (String reason : java.util.List.of("仍漏水", "再次检查")) {
+      call("POST", path + "/complete", Map.of("note", "处理完成"), "tech", null, true);
+      assertEquals(
+          400,
+          call("POST", path + "/return", Map.of("comment", "  "), "admin", null, true)
+              .statusCode());
+      assertEquals(
+          "IN_PROGRESS",
+          parse(call("POST", path + "/return", Map.of("comment", reason), "admin", null, true))
+              .path("status")
+              .asText());
+      assertTrue(RESTRICTIONS.get("M3/" + id).path("active").asBoolean());
+    }
+    var h = parse(call("GET", path + "/history", null, "admin", null, false));
+    assertEquals(3, h.size());
+    assertEquals("仍漏水", h.get(1).path("reason").asText());
+    assertEquals("再次检查", h.get(2).path("reason").asText());
+    assertEquals(1, COMMANDS.get());
+  }
+
+  @Test
+  void m3ConcurrentReassignmentsHaveOneWinnerAndOneHistoryEvent() throws Exception {
+    long id = reportedRepair();
+    assignRepair(id);
+    var barrier = new java.util.concurrent.CyclicBarrier(2);
+    try (var pool = java.util.concurrent.Executors.newFixedThreadPool(2)) {
+      java.util.concurrent.Callable<Integer> reassign =
+          () -> {
+            barrier.await();
+            return call(
+                    "POST",
+                    "/repair-orders/" + id + "/assign",
+                    Map.of("technicianId", 6, "expectedTechnicianId", 4, "reason", "交接"),
+                    "admin",
+                    null,
+                    true)
+                .statusCode();
+          };
+      var a = pool.submit(reassign);
+      var b = pool.submit(reassign);
+      assertEquals(java.util.Set.of(200, 409), java.util.Set.of(a.get(), b.get()));
+    }
+    assertEquals(
+        1,
+        db.queryForObject(
+            "SELECT count(*) FROM repair_history WHERE action='REASSIGN'", Integer.class));
+    assertEquals(
+        6L,
+        db.queryForObject("SELECT technician_id FROM repair_orders WHERE id=?", Long.class, id));
+  }
+
+  @Test
+  void m3IllegalTransitionsAreRejectedWithoutChangingStateOrCallingResource() throws Exception {
+    var allowed =
+        Map.of(
+            "REPORTED",
+            java.util.Set.of("assign"),
+            "ASSIGNED",
+            java.util.Set.of("assign", "start"),
+            "IN_PROGRESS",
+            java.util.Set.of("complete"),
+            "AWAITING_ACCEPTANCE",
+            java.util.Set.of("accept", "return"),
+            "ACCEPTED",
+            java.util.Set.<String>of(),
+            "PROCESSING",
+            java.util.Set.<String>of());
+    for (var entry : allowed.entrySet()) {
+      long id = reportedRepair();
+      assignRepair(id);
+      db.update("UPDATE repair_orders SET status=? WHERE id=?", entry.getKey(), id);
+      for (String action : java.util.List.of("assign", "start", "complete", "accept", "return")) {
+        if (entry.getValue().contains(action)) continue;
+        Object body =
+            switch (action) {
+              case "assign" -> Map.of("technicianId", 6, "expectedTechnicianId", 4, "reason", "换班");
+              case "complete" -> Map.of("note", "已完成");
+              default -> Map.of("comment", "验收意见");
+            };
+        assertEquals(
+            409,
+            call(
+                    "POST",
+                    "/repair-orders/" + id + "/" + action,
+                    body,
+                    action.equals("start") || action.equals("complete") ? "tech" : "admin",
+                    null,
+                    true)
+                .statusCode(),
+            entry.getKey() + "/" + action);
+        assertEquals(
+            entry.getKey(),
+            db.queryForObject("SELECT status FROM repair_orders WHERE id=?", String.class, id));
+      }
+    }
+    assertEquals(0, COMMANDS.get());
+  }
+
+  @Test
+  void m3HistoryFailureRollsBackAssignmentAndAllowsSameRequestToRetry() throws Exception {
+    long id = reportedRepair();
+    db.execute(
+        "CREATE FUNCTION fail_repair_history() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE"
+            + " EXCEPTION 'history failure'; END $$");
+    db.execute(
+        "CREATE TRIGGER fail_repair_history BEFORE INSERT ON repair_history FOR EACH ROW EXECUTE"
+            + " FUNCTION fail_repair_history()");
+    try {
+      assertEquals(
+          500,
+          call(
+                  "POST",
+                  "/repair-orders/" + id + "/assign",
+                  Map.of("technicianId", 4),
+                  "admin",
+                  "history-rollback",
+                  true)
+              .statusCode());
+      assertEquals(
+          "REPORTED",
+          db.queryForObject("SELECT status FROM repair_orders WHERE id=?", String.class, id));
+      assertEquals(0, db.queryForObject("SELECT count(*) FROM repair_history", Integer.class));
+      assertEquals(
+          0,
+          db.queryForObject(
+              "SELECT count(*) FROM idempotency_results WHERE request_key='history-rollback'",
+              Integer.class));
+    } finally {
+      db.execute("DROP TRIGGER fail_repair_history ON repair_history");
+      db.execute("DROP FUNCTION fail_repair_history()");
+    }
+    assertEquals(
+        200,
+        call(
+                "POST",
+                "/repair-orders/" + id + "/assign",
+                Map.of("technicianId", 4),
+                "admin",
+                "history-rollback",
+                true)
+            .statusCode());
   }
 
   @Test

@@ -81,6 +81,7 @@ class MultilevelApprovalIntegrationTest {
     r.add("workflow.resource-url", () -> "http://localhost:" + RESOURCE.getAddress().getPort());
     r.add("workflow.module-key", () -> "multilevel-test-secret-at-least-32-characters");
     r.add("workflow.retry-delay-ms", () -> "3600000");
+    r.add("workflow.repair.scan-ms", () -> "3600000");
     r.add("workflow.approval.expiry-scan-ms", () -> "3600000");
     r.add("workflow.approval.first-reviewer-ids", () -> "11");
     r.add("workflow.approval.final-reviewer-ids", () -> "12");
@@ -90,7 +91,7 @@ class MultilevelApprovalIntegrationTest {
   void clean() {
     db.execute(
         "TRUNCATE"
-            + " application_history,idempotency_results,outbox,audit_logs,classroom_applications,repair_orders"
+            + " repair_reviews,repair_escalations,repair_history,application_history,idempotency_results,outbox,audit_logs,classroom_applications,repair_orders"
             + " RESTART IDENTITY");
     // PostgreSQL TIMESTAMPTZ retains microseconds, so equality tests use the same precision.
     NOW.set(Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS));

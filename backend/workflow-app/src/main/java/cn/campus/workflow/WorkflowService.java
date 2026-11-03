@@ -60,6 +60,10 @@ class WorkflowService {
     return repo.repairs(user, pageSize, Rules.pageOffset(page, pageSize));
   }
 
+  List<RepairHistory> repairHistory(User user, long id) {
+    return repo.repairHistory(user, id);
+  }
+
   Result createApplication(User user, String key, ApplicationInput input, String requestId) {
     if (!user.has("APPLICANT") && !user.has("ADMIN")) throw ApiException.forbidden();
     Result replay = replay(user, "M2:create", key, input);
@@ -378,6 +382,13 @@ class WorkflowService {
           String current = string(row, "status");
           if (!current.equals("REPORTED") && !current.equals("ASSIGNED"))
             throw ApiException.conflict("只可分派待派单或已派单工单");
+          Long previous = row.get("technician_id") == null ? null : number(row, "technician_id");
+          boolean reassign = current.equals("ASSIGNED");
+          String reason = Rules.text(input.reason(), 1000, reassign);
+          if (reassign && !java.util.Objects.equals(previous, input.expectedTechnicianId()))
+            throw ApiException.conflict("维修人员已更新，请刷新后重新改派");
+          if (reassign && java.util.Objects.equals(previous, technician.id()))
+            throw ApiException.bad("请选择不同的维修人员");
           repo.jdbc()
               .update(
                   "UPDATE repair_orders SET"
@@ -386,7 +397,17 @@ class WorkflowService {
                   technician.id(),
                   technician.displayName(),
                   id);
-          repo.audit(user, "M3", id, "ASSIGN", requestId);
+          String action = reassign ? "REASSIGN" : "ASSIGN";
+          repo.audit(user, "M3", id, action, requestId);
+          repo.repairHistory(
+              user,
+              id,
+              action,
+              previous,
+              technician.id(),
+              reason,
+              requestId,
+              OffsetDateTime.now(clock));
           return new Mutation("M3", id, null);
         });
   }
@@ -400,7 +421,11 @@ class WorkflowService {
         input instanceof CompletionInput completion
             ? Rules.text(completion.note(), 2000, true)
             : null;
-    String comment = input instanceof CommentInput c ? Rules.text(c.comment(), 1000, false) : null;
+    String comment =
+        input instanceof CommentInput c
+            ? Rules.text(c.comment(), 1000, action.equals("return"))
+            : null;
+    if (action.equals("return") && comment == null) throw ApiException.bad("请填写返修原因");
     return write(
         user,
         "M3:" + id + ":" + action,
@@ -447,6 +472,17 @@ class WorkflowService {
                       comment,
                       id);
               repo.audit(user, "M3", id, "RETURN", requestId);
+              Long technician =
+                  row.get("technician_id") == null ? null : number(row, "technician_id");
+              repo.repairHistory(
+                  user,
+                  id,
+                  "RETURN",
+                  technician,
+                  technician,
+                  comment,
+                  requestId,
+                  OffsetDateTime.now(clock));
               return new Mutation("M3", id, null);
             }
             default -> throw ApiException.bad("未知工单操作");

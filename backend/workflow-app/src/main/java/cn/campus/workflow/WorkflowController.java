@@ -100,6 +100,11 @@ class WorkflowController {
     return response(service.resubmit(user, id, key, input, requestId));
   }
 
+  @GetMapping("/repair-orders/{id}/history")
+  List<RepairHistory> repairHistory(@RequestAttribute User user, @PathVariable long id) {
+    return service.repairHistory(user, id);
+  }
+
   @PostMapping("/repair-orders")
   ResponseEntity<String> createRepair(
       @RequestAttribute User user,

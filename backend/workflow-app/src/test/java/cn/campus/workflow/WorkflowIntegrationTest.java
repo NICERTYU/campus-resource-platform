@@ -77,7 +77,7 @@ class WorkflowIntegrationTest {
   void clean() {
     db.execute(
         "TRUNCATE"
-            + " application_history,idempotency_results,outbox,audit_logs,classroom_applications,repair_orders"
+            + " repair_history,application_history,idempotency_results,outbox,audit_logs,classroom_applications,repair_orders"
             + " RESTART IDENTITY");
     REMOTE_STATUS.set(200);
     COMMANDS.set(0);
@@ -463,6 +463,217 @@ class WorkflowIntegrationTest {
             .asText());
     assertFalse(RESTRICTIONS.get("M3/" + id).path("active").asBoolean());
     assertEquals(2, RESTRICTIONS.get("M3/" + id).path("version").asInt());
+  }
+
+  long reportedRepair() throws Exception {
+    return parse(
+            call(
+                "POST",
+                "/repair-orders",
+                Map.of("classroomId", 1, "description", "M3专项故障"),
+                "student",
+                null,
+                true))
+        .path("id")
+        .asLong();
+  }
+
+  void assignRepair(long id) throws Exception {
+    assertEquals(
+        200,
+        call(
+                "POST",
+                "/repair-orders/" + id + "/assign",
+                Map.of("technicianId", 4),
+                "admin",
+                null,
+                true)
+            .statusCode());
+  }
+
+  @Test
+  void m3ReassignmentKeepsHistoryRejectsStaleOwnerAndRevokesOldTechnician() throws Exception {
+    long id = reportedRepair();
+    assignRepair(id);
+    String path = "/repair-orders/" + id;
+    assertEquals(
+        400,
+        call("POST", path + "/assign", Map.of("technicianId", 6), "admin", null, true)
+            .statusCode());
+    var body = Map.of("technicianId", 6, "expectedTechnicianId", 4, "reason", "人员调度");
+    assertEquals(403, call("POST", path + "/assign", body, "student", null, true).statusCode());
+    var first = call("POST", path + "/assign", body, "admin", "reassign-key", true);
+    assertEquals(200, first.statusCode());
+    assertEquals(
+        first.body(), call("POST", path + "/assign", body, "admin", "reassign-key", true).body());
+    assertEquals(409, call("POST", path + "/assign", body, "admin", null, true).statusCode());
+    assertEquals(403, call("POST", path + "/start", Map.of(), "tech", null, true).statusCode());
+    assertEquals(403, call("GET", path + "/history", null, "other", null, false).statusCode());
+    assertEquals(403, call("GET", path + "/history", null, "tech", null, false).statusCode());
+    var history = parse(call("GET", path + "/history", null, "student", null, false));
+    assertEquals(2, history.size());
+    assertEquals("REASSIGN", history.get(1).path("action").asText());
+    assertEquals(4, history.get(1).path("previousTechnicianId").asLong());
+    assertEquals(6, history.get(1).path("technicianId").asLong());
+    assertEquals("人员调度", history.get(1).path("reason").asText());
+    assertTrue(history.get(1).hasNonNull("createdAt"));
+    assertEquals(
+        "IN_PROGRESS",
+        parse(call("POST", path + "/start", Map.of(), "othertech", null, true))
+            .path("status")
+            .asText());
+    assertEquals(409, call("POST", path + "/assign", body, "admin", null, true).statusCode());
+    assertEquals(1, COMMANDS.get());
+  }
+
+  @Test
+  void m3ReturnRequiresServerSideReasonAndRetainsEveryReasonWithoutReleasingSeats()
+      throws Exception {
+    long id = reportedRepair();
+    assignRepair(id);
+    String path = "/repair-orders/" + id;
+    call("POST", path + "/start", Map.of(), "tech", null, true);
+    for (String reason : java.util.List.of("仍漏水", "再次检查")) {
+      call("POST", path + "/complete", Map.of("note", "处理完成"), "tech", null, true);
+      assertEquals(
+          400,
+          call("POST", path + "/return", Map.of("comment", "  "), "admin", null, true)
+              .statusCode());
+      assertEquals(
+          "IN_PROGRESS",
+          parse(call("POST", path + "/return", Map.of("comment", reason), "admin", null, true))
+              .path("status")
+              .asText());
+      assertTrue(RESTRICTIONS.get("M3/" + id).path("active").asBoolean());
+    }
+    var h = parse(call("GET", path + "/history", null, "admin", null, false));
+    assertEquals(3, h.size());
+    assertEquals("仍漏水", h.get(1).path("reason").asText());
+    assertEquals("再次检查", h.get(2).path("reason").asText());
+    assertEquals(1, COMMANDS.get());
+  }
+
+  @Test
+  void m3ConcurrentReassignmentsHaveOneWinnerAndOneHistoryEvent() throws Exception {
+    long id = reportedRepair();
+    assignRepair(id);
+    var barrier = new java.util.concurrent.CyclicBarrier(2);
+    try (var pool = java.util.concurrent.Executors.newFixedThreadPool(2)) {
+      java.util.concurrent.Callable<Integer> reassign =
+          () -> {
+            barrier.await();
+            return call(
+                    "POST",
+                    "/repair-orders/" + id + "/assign",
+                    Map.of("technicianId", 6, "expectedTechnicianId", 4, "reason", "交接"),
+                    "admin",
+                    null,
+                    true)
+                .statusCode();
+          };
+      var a = pool.submit(reassign);
+      var b = pool.submit(reassign);
+      assertEquals(java.util.Set.of(200, 409), java.util.Set.of(a.get(), b.get()));
+    }
+    assertEquals(
+        1,
+        db.queryForObject(
+            "SELECT count(*) FROM repair_history WHERE action='REASSIGN'", Integer.class));
+    assertEquals(
+        6L,
+        db.queryForObject("SELECT technician_id FROM repair_orders WHERE id=?", Long.class, id));
+  }
+
+  @Test
+  void m3IllegalTransitionsAreRejectedWithoutChangingStateOrCallingResource() throws Exception {
+    var allowed =
+        Map.of(
+            "REPORTED",
+            java.util.Set.of("assign"),
+            "ASSIGNED",
+            java.util.Set.of("assign", "start"),
+            "IN_PROGRESS",
+            java.util.Set.of("complete"),
+            "AWAITING_ACCEPTANCE",
+            java.util.Set.of("accept", "return"),
+            "ACCEPTED",
+            java.util.Set.<String>of(),
+            "PROCESSING",
+            java.util.Set.<String>of());
+    for (var entry : allowed.entrySet()) {
+      long id = reportedRepair();
+      assignRepair(id);
+      db.update("UPDATE repair_orders SET status=? WHERE id=?", entry.getKey(), id);
+      for (String action : java.util.List.of("assign", "start", "complete", "accept", "return")) {
+        if (entry.getValue().contains(action)) continue;
+        Object body =
+            switch (action) {
+              case "assign" -> Map.of("technicianId", 6, "expectedTechnicianId", 4, "reason", "换班");
+              case "complete" -> Map.of("note", "已完成");
+              default -> Map.of("comment", "验收意见");
+            };
+        assertEquals(
+            409,
+            call(
+                    "POST",
+                    "/repair-orders/" + id + "/" + action,
+                    body,
+                    action.equals("start") || action.equals("complete") ? "tech" : "admin",
+                    null,
+                    true)
+                .statusCode(),
+            entry.getKey() + "/" + action);
+        assertEquals(
+            entry.getKey(),
+            db.queryForObject("SELECT status FROM repair_orders WHERE id=?", String.class, id));
+      }
+    }
+    assertEquals(0, COMMANDS.get());
+  }
+
+  @Test
+  void m3HistoryFailureRollsBackAssignmentAndAllowsSameRequestToRetry() throws Exception {
+    long id = reportedRepair();
+    db.execute(
+        "CREATE FUNCTION fail_repair_history() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE"
+            + " EXCEPTION 'history failure'; END $$");
+    db.execute(
+        "CREATE TRIGGER fail_repair_history BEFORE INSERT ON repair_history FOR EACH ROW EXECUTE"
+            + " FUNCTION fail_repair_history()");
+    try {
+      assertEquals(
+          500,
+          call(
+                  "POST",
+                  "/repair-orders/" + id + "/assign",
+                  Map.of("technicianId", 4),
+                  "admin",
+                  "history-rollback",
+                  true)
+              .statusCode());
+      assertEquals(
+          "REPORTED",
+          db.queryForObject("SELECT status FROM repair_orders WHERE id=?", String.class, id));
+      assertEquals(0, db.queryForObject("SELECT count(*) FROM repair_history", Integer.class));
+      assertEquals(
+          0,
+          db.queryForObject(
+              "SELECT count(*) FROM idempotency_results WHERE request_key='history-rollback'",
+              Integer.class));
+    } finally {
+      db.execute("DROP TRIGGER fail_repair_history ON repair_history");
+      db.execute("DROP FUNCTION fail_repair_history()");
+    }
+    assertEquals(
+        200,
+        call(
+                "POST",
+                "/repair-orders/" + id + "/assign",
+                Map.of("technicianId", 4),
+                "admin",
+                "history-rollback",
+                true)
+            .statusCode());
   }
 
   @Test

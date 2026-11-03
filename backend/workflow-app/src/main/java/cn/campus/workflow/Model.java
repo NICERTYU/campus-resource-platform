@@ -48,7 +48,18 @@ final class Model {
       String requestId,
       OffsetDateTime createdAt) {}
 
-  record AssignmentInput(Long technicianId) {}
+  record AssignmentInput(Long technicianId, String reason, Long expectedTechnicianId) {}
+
+  record RepairHistory(
+      long id,
+      String action,
+      long actorId,
+      String actorName,
+      Long previousTechnicianId,
+      Long technicianId,
+      String reason,
+      String requestId,
+      OffsetDateTime createdAt) {}
 
   record CompletionInput(String note) {}
 

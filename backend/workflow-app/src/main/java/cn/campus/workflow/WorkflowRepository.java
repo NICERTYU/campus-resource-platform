@@ -137,6 +137,56 @@ class WorkflowRepository {
         id);
   }
 
+  void repairHistory(
+      User user,
+      long id,
+      String action,
+      Long previousTechnician,
+      Long technician,
+      String reason,
+      String requestId,
+      OffsetDateTime at) {
+    db.update(
+        """
+        INSERT INTO repair_history(repair_id,action,actor_id,actor_name,previous_technician_id,
+          technician_id,reason,request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?)
+        """,
+        id,
+        action,
+        user.id(),
+        user.displayName(),
+        previousTechnician,
+        technician,
+        reason,
+        requestId,
+        at);
+  }
+
+  List<RepairHistory> repairHistory(User user, long id) {
+    var rows =
+        db.queryForList("SELECT reporter_id,technician_id FROM repair_orders WHERE id=?", id);
+    if (rows.isEmpty()) throw new ApiException(404, "NOT_FOUND", "工单不存在");
+    var row = rows.getFirst();
+    if (!user.has("ADMIN")
+        && number(row, "reporter_id") != user.id()
+        && !java.util.Objects.equals(row.get("technician_id"), user.id()))
+      throw ApiException.forbidden();
+    return db.query(
+        "SELECT * FROM repair_history WHERE repair_id=? ORDER BY id",
+        (r, n) ->
+            new RepairHistory(
+                r.getLong("id"),
+                r.getString("action"),
+                r.getLong("actor_id"),
+                r.getString("actor_name"),
+                r.getObject("previous_technician_id", Long.class),
+                r.getObject("technician_id", Long.class),
+                r.getString("reason"),
+                r.getString("request_id"),
+                time(r, "created_at")),
+        id);
+  }
+
   long intent(
       String type,
       long id,

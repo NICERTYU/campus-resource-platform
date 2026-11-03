@@ -14,6 +14,38 @@
 
 学生 `student`、`student2`，艺术学院学生 `outsider`，申请人 `applicant`，管理员 `admin`，维修员 `technician`。演示密码 `Campus123!`。学生/申请人属于CS；教室为公共图书馆、CS专属、ART专属各24座。演示初始化设置当天签到码246810，跨天需管理员重新设置。账户仅由显式初始化建立；普通启动不会造数据或重置状态。以上固定口令仅用于本地演示；云测试环境的六个预置账号已改用独立随机强口令。
 
+## Windows / WSL 2 开发
+
+Windows 使用 Ubuntu 内的 Java21、Node24、Python3、Docker Engine 和 Compose；前后端与数据库在同一个 Linux 环境运行。Windows 的 Node、Java 安装不替代 Ubuntu 内的工具。已有 WSL Docker Engine 时无需再安装 Docker Desktop，也无需安装 Windows PostgreSQL 或全局 Maven。
+
+安装 Ubuntu 的 `openjdk-21-jdk-headless`、`docker.io`、`docker-compose-v2`、`python3`、`curl`、`xz-utils`；Docker 服务需可用，当前用户需有访问 Docker 的权限。将用户加入 Docker 组相当于授予 Linux 管理员级能力，应由使用者明确同意。Ubuntu 启动时可由 systemd 启动 Docker，无需将 Windows 设置为自动启动整个项目。
+
+Node 按根目录 `.node-version` 从 [Node 官方下载目录](https://nodejs.org/dist/)下载 Linux x64 压缩包，使用同版本 `SHASUMS256.txt` 验证后，解压至 `~/.local/share/campus-tools/`。启动器优先选用该目录的项目版本，也接受 PATH 中的 Node24。不同项目无需共享或覆盖系统 Node。
+
+在 Windows PowerShell 中进入仓库根目录后运行：
+
+```powershell
+# 检查 Ubuntu 内的版本、Docker 连接和 Maven Wrapper；不启动项目。
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows.ps1 check
+# 启动数据库、构建并初始化后端、启动前后端；Ctrl+C 停止应用，保留数据库。
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows.ps1 dev
+```
+
+浏览器打开 `http://localhost:5173`。命令只为本次脚本执行设置策略，不改变 Windows 的全局执行策略。发行版不是 Ubuntu 时，加 `-Distribution 发行版名称`。脚本按独立参数传递路径，支持中文和空格。凭据写入被 Git 忽略的 `.local/dev.env`，不要上传；不会连接云端数据库或自动推送代码。
+
+启动器为本次进程补充 `127.0.0.1,localhost,::1` 代理排除项，避免 Windows 的 `127.*` 排除写法被 Linux curl 忽略而导致本地健康检查超时。仓库的 `.gitattributes` 为 Linux 脚本和前端源码固定 LF 换行，避免 Windows 检出产生解释器错误或整库格式检查失败。
+
+开发服务器运行时，在第二个 PowerShell 中执行真实 HTTP 与数据库权限验证：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows.ps1 http
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows.ps1 database
+```
+
+停止开发服务器后运行 `windows.ps1 test` 执行 Python、后端 PostgreSQL 集成测试及前端测试/构建。`windows.ps1 browser-install` 安装 Chromium 与 Linux 浏览器依赖，安装系统依赖时可能需要 Ubuntu 管理员密码。浏览器验收按下节准备相同的 `E2E_CLOCK`，再运行 `windows.ps1 e2e`。不要在同一目录混用 Windows 和 Linux 的 `node_modules`；本启动方式使用 Linux 依赖。
+
+VS Code 可通过已安装的 WSL 扩展选择“在 WSL 中重新打开文件夹”，再在该远程窗口安装 Java Extension Pack 和 Vue - Official。这样编辑器使用的 Java、Node 与实际运行环境一致。
+
 ## 自动验证
 
 ```bash

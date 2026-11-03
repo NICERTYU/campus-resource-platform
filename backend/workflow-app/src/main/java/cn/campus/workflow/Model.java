@@ -99,6 +99,11 @@ final class Model {
       OffsetDateTime createdAt,
       OffsetDateTime repairDeadline) {}
 
+  record RepairReviewInput(java.math.BigDecimal rating, String comment) {}
+
+  record RepairReview(
+      long repairId, long reviewerId, int rating, String comment, OffsetDateTime reviewedAt) {}
+
   record RepairEscalation(
       long id,
       long repairId,

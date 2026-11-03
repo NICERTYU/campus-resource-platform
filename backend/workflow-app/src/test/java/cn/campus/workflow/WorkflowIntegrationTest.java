@@ -80,7 +80,7 @@ class WorkflowIntegrationTest {
   void clean() {
     db.execute(
         "TRUNCATE"
-            + " repair_escalations,repair_history,application_history,idempotency_results,outbox,audit_logs,classroom_applications,repair_orders"
+            + " repair_reviews,repair_escalations,repair_history,application_history,idempotency_results,outbox,audit_logs,classroom_applications,repair_orders"
             + " RESTART IDENTITY");
     REMOTE_STATUS.set(200);
     COMMANDS.set(0);
@@ -736,6 +736,188 @@ class WorkflowIntegrationTest {
     }
     assertEquals(0, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
     assertTrue(RESTRICTIONS.get("M3/" + id).path("active").asBoolean());
+  }
+
+  long acceptedRepair() throws Exception {
+    long id = reportedRepair();
+    assignRepair(id);
+    String path = "/repair-orders/" + id;
+    assertEquals(200, call("POST", path + "/start", Map.of(), "tech", null, true).statusCode());
+    assertEquals(
+        200,
+        call("POST", path + "/complete", Map.of("note", "修复完成"), "tech", null, true).statusCode());
+    assertEquals(
+        "ACCEPTED",
+        parse(call("POST", path + "/accept", Map.of(), "admin", null, true))
+            .path("status")
+            .asText());
+    return id;
+  }
+
+  @Test
+  void m3ReviewRequiresReporterAndFinalAcceptanceForEveryPrematureState() throws Exception {
+    long id = reportedRepair();
+    String path = "/repair-orders/" + id + "/review";
+    var body = Map.of("rating", 5, "comment", "满意");
+    assertEquals(204, call("GET", path, null, "student", null, false).statusCode());
+    for (String state :
+        java.util.List.of(
+            "REPORTED", "ASSIGNED", "IN_PROGRESS", "AWAITING_ACCEPTANCE", "PROCESSING")) {
+      db.update("UPDATE repair_orders SET status=? WHERE id=?", state, id);
+      assertEquals(409, call("POST", path, body, "student", null, true).statusCode());
+    }
+    db.update("UPDATE repair_orders SET status='ACCEPTED' WHERE id=?", id);
+    assertEquals(401, call("POST", path, body, null, null, true).statusCode());
+    assertEquals(403, call("POST", path, body, "student", null, false).statusCode());
+    for (String actor : java.util.List.of("admin", "other", "tech")) {
+      assertEquals(403, call("POST", path, body, actor, null, true).statusCode());
+    }
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM repair_reviews", Integer.class));
+  }
+
+  @Test
+  void m3ReviewValidatesScoreAndTextAndReplaysOnlyTheSameIdempotentRequest() throws Exception {
+    long id = acceptedRepair();
+    String path = "/repair-orders/" + id + "/review";
+    for (Number rating : java.util.List.of(0, 6, 1.5))
+      assertEquals(
+          400, call("POST", path, Map.of("rating", rating), "student", null, true).statusCode());
+    assertEquals(
+        400,
+        call("POST", path, Map.of("rating", 5, "comment", "a".repeat(1001)), "student", null, true)
+            .statusCode());
+    assertEquals(
+        400, call("POST", path, Map.of("comment", "缺评分"), "student", null, true).statusCode());
+    var before =
+        db.queryForMap(
+            "SELECT status,source_version,restriction_start FROM repair_orders WHERE id=?", id);
+    var body = Map.of("rating", 5, "comment", "维修及时");
+    var first = call("POST", path, body, "student", "review-key", true);
+    assertEquals(201, first.statusCode());
+    assertEquals(1, parse(first).path("reviewerId").asLong());
+    assertTrue(parse(first).hasNonNull("reviewedAt"));
+    assertEquals(first.body(), call("POST", path, body, "student", "review-key", true).body());
+    assertEquals(
+        "IDEMPOTENCY_CONFLICT",
+        parse(call("POST", path, Map.of("rating", 1), "student", "review-key", true))
+            .path("code")
+            .asText());
+    assertEquals(409, call("POST", path, body, "student", "another-key", true).statusCode());
+    assertEquals(first.body(), call("GET", path, null, "student", null, false).body());
+    assertEquals(200, call("GET", path, null, "admin", null, false).statusCode());
+    assertEquals(403, call("GET", path, null, "other", null, false).statusCode());
+    assertEquals(403, call("GET", path, null, "tech", null, false).statusCode());
+    assertEquals(
+        before,
+        db.queryForMap(
+            "SELECT status,source_version,restriction_start FROM repair_orders WHERE id=?", id));
+    assertEquals(2, COMMANDS.get());
+    assertEquals(
+        1,
+        db.queryForObject("SELECT count(*) FROM audit_logs WHERE action='REVIEW'", Integer.class));
+    assertThrows(
+        org.springframework.dao.DataIntegrityViolationException.class,
+        () ->
+            db.update(
+                "INSERT INTO repair_reviews SELECT"
+                    + " repair_id,reviewer_id,rating,comment,'duplicate',reviewed_at FROM"
+                    + " repair_reviews WHERE repair_id=?",
+                id));
+  }
+
+  @Test
+  void m3ConcurrentReviewsHaveOneWinnerAndSameKeyRetriesReplayExactly() throws Exception {
+    for (boolean sameKey : java.util.List.of(false, true)) {
+      long id = acceptedRepair();
+      var barrier = new java.util.concurrent.CyclicBarrier(2);
+      try (var pool = java.util.concurrent.Executors.newFixedThreadPool(2)) {
+        var a =
+            pool.submit(
+                () -> {
+                  barrier.await();
+                  return call(
+                      "POST",
+                      "/repair-orders/" + id + "/review",
+                      Map.of("rating", 4),
+                      "student",
+                      "key-a",
+                      true);
+                });
+        var b =
+            pool.submit(
+                () -> {
+                  barrier.await();
+                  return call(
+                      "POST",
+                      "/repair-orders/" + id + "/review",
+                      Map.of("rating", 4),
+                      "student",
+                      sameKey ? "key-a" : "key-b",
+                      true);
+                });
+        var first = a.get();
+        var second = b.get();
+        if (sameKey) {
+          assertEquals(201, first.statusCode());
+          assertEquals(first.body(), second.body());
+        } else
+          assertEquals(
+              java.util.Set.of(201, 409),
+              java.util.Set.of(first.statusCode(), second.statusCode()));
+      }
+      assertEquals(
+          1,
+          db.queryForObject(
+              "SELECT count(*) FROM repair_reviews WHERE repair_id=?", Integer.class, id));
+      assertEquals(
+          1,
+          db.queryForObject(
+              "SELECT count(*) FROM audit_logs WHERE source_type='M3' AND source_id=? AND"
+                  + " action='REVIEW'",
+              Integer.class,
+              id));
+    }
+  }
+
+  @Test
+  void m3ReviewAuditFailureRollsBackEvaluationAndAllowsRetry() throws Exception {
+    long id = acceptedRepair();
+    db.execute(
+        "CREATE FUNCTION fail_review_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF"
+            + " NEW.action='REVIEW' THEN RAISE EXCEPTION 'review audit failure'; END IF; RETURN"
+            + " NEW; END $$");
+    db.execute(
+        "CREATE TRIGGER fail_review_audit BEFORE INSERT ON audit_logs FOR EACH ROW EXECUTE FUNCTION"
+            + " fail_review_audit()");
+    try {
+      assertEquals(
+          500,
+          call(
+                  "POST",
+                  "/repair-orders/" + id + "/review",
+                  Map.of("rating", 5),
+                  "student",
+                  "retry-audit",
+                  true)
+              .statusCode());
+      assertEquals(0, db.queryForObject("SELECT count(*) FROM repair_reviews", Integer.class));
+      assertEquals(
+          "ACCEPTED",
+          db.queryForObject("SELECT status FROM repair_orders WHERE id=?", String.class, id));
+    } finally {
+      db.execute("DROP TRIGGER fail_review_audit ON audit_logs");
+      db.execute("DROP FUNCTION fail_review_audit()");
+    }
+    assertEquals(
+        201,
+        call(
+                "POST",
+                "/repair-orders/" + id + "/review",
+                Map.of("rating", 5),
+                "student",
+                "retry-audit",
+                true)
+            .statusCode());
   }
 
   void assignRepair(long id) throws Exception {

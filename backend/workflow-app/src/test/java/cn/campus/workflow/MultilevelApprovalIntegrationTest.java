@@ -91,7 +91,7 @@ class MultilevelApprovalIntegrationTest {
   void clean() {
     db.execute(
         "TRUNCATE"
-            + " repair_escalations,repair_history,application_history,idempotency_results,outbox,audit_logs,classroom_applications,repair_orders"
+            + " repair_reviews,repair_escalations,repair_history,application_history,idempotency_results,outbox,audit_logs,classroom_applications,repair_orders"
             + " RESTART IDENTITY");
     // PostgreSQL TIMESTAMPTZ retains microseconds, so equality tests use the same precision.
     NOW.set(Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS));

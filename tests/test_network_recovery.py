@@ -78,6 +78,7 @@ class RealNetworkRecovery(unittest.TestCase):
         cls.schema = "workflow_fault_" + uuid.uuid4().hex[:10]
         cls.schema_created = False
         cls.source_ids = []
+        cls.repair_ids = []
         cls.room_ids = []
         cls.addClassCleanup(cls.cleanup)
         cls.proxy = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FaultProxy)
@@ -91,7 +92,8 @@ class RealNetworkRecovery(unittest.TestCase):
         cls.schema_created = True
         cls.env.update({"DB_URL": "jdbc:postgresql://127.0.0.1:%s/campus?currentSchema=%s" % (cls.env.get("DB_PORT", "54329"), cls.schema),
                         "DB_USERNAME": "campus_workflow", "DB_PASSWORD": cls.env["WORKFLOW_DB_PASSWORD"],
-                        "RESOURCE_URL": "http://127.0.0.1:%s" % cls.proxy.server_port, "RETRY_DELAY_MS": "250"})
+                        "RESOURCE_URL": "http://127.0.0.1:%s" % cls.proxy.server_port, "RETRY_DELAY_MS": "250",
+                        "M3_REPAIR_SCAN_MS": "250"})
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             cls.port = listener.getsockname()[1]
@@ -102,10 +104,12 @@ class RealNetworkRecovery(unittest.TestCase):
         for table in ("classroom_applications", "repair_orders"):
             cls.sql("SELECT setval(pg_get_serial_sequence('%s.%s','id'), %s)" % (cls.schema, table, sequence_start))
         cls.admin = Client("admin")
+        cls.student = Client("student")
+        cls.technician = Client("technician")
 
     @classmethod
     def sql(cls, query):
-        return subprocess.run(["docker", "exec", "campus-dev-db-1", "psql", "-v", "ON_ERROR_STOP=1", "-U", "campus_owner", "-d", "campus", "-tAc", query],
+        return subprocess.run(["docker", "exec", os.environ.get("CAMPUS_DB_CONTAINER", "campus-dev-db-1"), "psql", "-v", "ON_ERROR_STOP=1", "-U", "campus_owner", "-d", "campus", "-tAc", query],
                               check=True, capture_output=True, text=True).stdout.strip()
     @classmethod
     def launch(cls):
@@ -152,6 +156,9 @@ class RealNetworkRecovery(unittest.TestCase):
         if cls.source_ids:
             ids = ",".join(str(value) for value in cls.source_ids)
             cls.sql("DELETE FROM resource.audit_logs WHERE object_type='M2' AND object_id IN (%s); DELETE FROM resource.restrictions WHERE source_type='M2' AND source_id IN (%s)" % (ids, ids))
+        if cls.repair_ids:
+            ids = ",".join(str(value) for value in cls.repair_ids)
+            cls.sql("DELETE FROM resource.audit_logs WHERE object_type='M3' AND object_id IN (%s); DELETE FROM resource.restrictions WHERE source_type='M3' AND source_id IN (%s)" % (ids, ids))
         if cls.room_ids:
             ids = ",".join(str(value) for value in cls.room_ids)
             cls.sql("DELETE FROM resource.audit_logs WHERE object_type='classroom' AND object_id IN (%s); DELETE FROM resource.classrooms WHERE id IN (%s)" % (ids, ids))
@@ -159,18 +166,23 @@ class RealNetworkRecovery(unittest.TestCase):
             cls.sql("DROP SCHEMA IF EXISTS %s CASCADE" % cls.schema)
         FaultProxy.mode = "normal"
 
-    def request(self, method, path, body=None, key=None):
-        headers = {"X-CSRF-TOKEN": self.admin.csrf, "Content-Type": "application/json"}
+    def tearDown(self):
+        FaultProxy.mode = "normal"
+
+    def request(self, method, path, body=None, key=None, client=None):
+        client = client or self.admin
+        headers = {"X-CSRF-TOKEN": client.csrf, "Content-Type": "application/json"}
         if key:
             headers["Idempotency-Key"] = key
         request = urllib.request.Request("http://127.0.0.1:%s/api/v1%s" % (self.port, path),
                  headers=headers, data=None if body is None else json.dumps(body).encode(), method=method)
         try:
-            result = self.admin.opener.open(request, timeout=20)
+            result = client.opener.open(request, timeout=20)
         except urllib.error.HTTPError as error:
             result = error
         with result:
-            return result.status, json.loads(result.read())
+            content = result.read()
+            return result.status, json.loads(content) if content else None
     def application(self):
         status, room = self.admin.request("POST", "/admin/classrooms", {"name": "网络恢复-" + uuid.uuid4().hex[:8],
             "building": "测试楼", "floor": 1, "department": None, "openTime": "08:00", "closeTime": "22:00", "enabled": True})
@@ -199,6 +211,88 @@ class RealNetworkRecovery(unittest.TestCase):
         self.fail("outbox did not recover to APPROVED")
     def source_count(self, application):
         return int(self.sql("SELECT count(*) FROM resource.restrictions WHERE source_type='M2' AND source_id=%s AND active" % application["id"]))
+
+    def repair(self):
+        status, room = self.admin.request("POST", "/admin/classrooms", {
+            "name": "M3网络恢复-" + uuid.uuid4().hex[:8], "building": "测试楼", "floor": 1,
+            "department": None, "openTime": "08:00", "closeTime": "22:00", "enabled": True})
+        self.assertIn(status, (200, 201), room)
+        self.room_ids.append(room["id"])
+        status, record = self.request("POST", "/repair-orders", {
+            "classroomId": room["id"], "description": "M3真实网络故障"}, client=self.student)
+        self.assertEqual(status, 201, record)
+        self.repair_ids.append(record["id"])
+        status, record = self.request("POST", "/repair-orders/%s/assign" % record["id"],
+                                      {"technicianId": self.technician.user["id"]})
+        self.assertEqual(status, 200, record)
+        return record
+
+    def eventually_repair(self, repair, expected):
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            status, records = self.request("GET", "/repair-orders?pageSize=200")
+            self.assertEqual(status, 200, records)
+            record = next(row for row in records if row["id"] == repair["id"])
+            if record["status"] == expected:
+                return record
+            time.sleep(0.2)
+        self.fail("M3 did not recover to " + expected)
+
+    def repair_source_count(self, repair):
+        return int(self.sql("SELECT count(*) FROM resource.restrictions WHERE source_type='M3' AND source_id=%s AND active" % repair["id"]))
+
+    def test_M3_start_503_and_acceptance_response_loss_recover_after_real_restarts(self):
+        repair = self.repair()
+        path = "/repair-orders/%s" % repair["id"]
+        FaultProxy.mode = "unavailable"
+        status, record = self.request("POST", path + "/start", {}, key=uuid.uuid4().hex, client=self.technician)
+        self.assertEqual(status, 202, record)
+        self.assertEqual(record["pendingAction"], "START")
+        self.assertEqual(self.repair_source_count(repair), 0)
+        self.stop()
+        FaultProxy.mode = "normal"
+        self.launch()
+        self.eventually_repair(repair, "IN_PROGRESS")
+        self.assertEqual(self.repair_source_count(repair), 1)
+        self.assertEqual(self.request("POST", path + "/complete", {"note": "已修复"}, client=self.technician)[0], 200)
+        FaultProxy.mode = "response-lost"
+        status, record = self.request("POST", path + "/accept", {}, key=uuid.uuid4().hex)
+        self.assertEqual(status, 202, record)
+        self.assertEqual(record["pendingAction"], "ACCEPT")
+        self.assertEqual(self.repair_source_count(repair), 0)
+        self.stop()
+        FaultProxy.mode = "normal"
+        self.launch()
+        self.eventually_repair(repair, "ACCEPTED")
+        self.assertEqual(self.repair_source_count(repair), 0)
+        self.assertEqual(int(self.sql("SELECT version FROM resource.restrictions WHERE source_type='M3' AND source_id=%s" % repair["id"])), 2)
+        self.assertEqual(int(self.sql("SELECT count(*) FROM resource.audit_logs WHERE object_type='M3' AND object_id=%s" % repair["id"])), 2)
+
+    def test_M3_timeout_scanning_survives_process_restart_without_releasing_maintenance(self):
+        repair = self.repair()
+        self.assertEqual(self.request("POST", "/repair-orders/%s/start" % repair["id"], {}, client=self.technician)[0], 200)
+        self.stop()
+        self.sql("UPDATE %s.repair_orders SET repair_deadline=CURRENT_TIMESTAMP-INTERVAL '1 day' WHERE id=%s" % (self.schema, repair["id"]))
+        self.launch()
+        deadline = time.monotonic() + 20
+        events = []
+        while time.monotonic() < deadline:
+            status, records = self.request("GET", "/repair-orders/escalations?pageSize=200")
+            self.assertEqual(status, 200, records)
+            events = [record for record in records if record["repairId"] == repair["id"]]
+            if events:
+                break
+            time.sleep(0.2)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["notificationStatus"], "AVAILABLE")
+        self.assertEqual(self.repair_source_count(repair), 1)
+        self.stop()
+        self.launch()
+        self.eventually_repair(repair, "IN_PROGRESS")
+        status, records = self.request("GET", "/repair-orders/escalations?pageSize=200")
+        self.assertEqual(status, 200, records)
+        self.assertEqual(sum(record["repairId"] == repair["id"] for record in records), 1)
+        self.assertEqual(self.repair_source_count(repair), 1)
 
     def test_T15_real_resource_unavailable_then_restart_recovers(self):
         application = self.application()

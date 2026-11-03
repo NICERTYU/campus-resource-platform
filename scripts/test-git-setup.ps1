@@ -6,6 +6,14 @@ param(
 # Run manually after configuring this checkout; this does not contact the network.
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
+
+# Check all refs and objects, including branches other than the current branch.
+& git -C $repoRoot fsck --full --no-dangling
+if ($LASTEXITCODE -ne 0) {
+    throw 'Repository integrity check failed; inspect Git metadata before switching or pushing.'
+}
+Write-Output 'PASS: repository integrity'
+
 $checks = @(
     @{ Name = 'origin fetch URL'; Args = @('remote', 'get-url', 'origin'); Expected = $ExpectedRemoteUrl },
     @{ Name = 'origin push URL'; Args = @('remote', 'get-url', '--push', 'origin'); Expected = $ExpectedRemoteUrl },

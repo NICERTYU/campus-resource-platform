@@ -95,7 +95,9 @@ final class Model {
       String note,
       String comment,
       String pendingAction,
-      String lastError) {}
+      String lastError,
+      OffsetDateTime createdAt,
+      OffsetDateTime repairDeadline) {}
 
   record Restriction(
       long version,

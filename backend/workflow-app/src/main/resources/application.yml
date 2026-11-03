@@ -16,6 +16,9 @@ workflow:
   resource-url: ${RESOURCE_URL:http://localhost:8081}
   module-key: ${MODULE_KEY}
   retry-delay-ms: ${RETRY_DELAY_MS:5000}
+  repair:
+    timeout: ${M3_REPAIR_TIMEOUT:PT24H}
+    scan-ms: ${M3_REPAIR_SCAN_MS:60000}
   approval:
     steps: ${WORKFLOW_APPROVAL_STEPS:2}
     timeout: ${M2_APPROVAL_TIMEOUT:PT24H}

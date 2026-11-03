@@ -255,7 +255,9 @@ class WorkflowRepository {
         r.getString("note"),
         r.getString("comment"),
         r.getString("pending_action"),
-        r.getString("last_error"));
+        r.getString("last_error"),
+        time(r, "created_at"),
+        time(r, "repair_deadline"));
   }
 
   static OffsetDateTime time(ResultSet r, String field) throws SQLException {

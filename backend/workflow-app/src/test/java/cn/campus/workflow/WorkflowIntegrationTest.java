@@ -478,6 +478,27 @@ class WorkflowIntegrationTest {
         .asLong();
   }
 
+  @Test
+  void m3NewRepairsPersistConfiguredDeadlineAndIdempotentCreationKeepsIt() throws Exception {
+    var body = Map.of("classroomId", 1, "description", "期限验证");
+    var response = call("POST", "/repair-orders", body, "student", "deadline-create", true);
+    assertEquals(201, response.statusCode());
+    var record = parse(response);
+    var created = java.time.OffsetDateTime.parse(record.path("createdAt").asText());
+    var deadline = java.time.OffsetDateTime.parse(record.path("repairDeadline").asText());
+    assertEquals(java.time.Duration.ofHours(24), java.time.Duration.between(created, deadline));
+    assertEquals(
+        response.body(),
+        call("POST", "/repair-orders", body, "student", "deadline-create", true).body());
+    assertEquals(
+        deadline.toInstant(),
+        db.queryForObject(
+                "SELECT repair_deadline FROM repair_orders WHERE id=?",
+                java.time.OffsetDateTime.class,
+                record.path("id").asLong())
+            .toInstant());
+  }
+
   void assignRepair(long id) throws Exception {
     assertEquals(
         200,

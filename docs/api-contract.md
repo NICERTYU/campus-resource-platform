@@ -36,8 +36,8 @@ M2 新申请使用两级审批及版本校验，完整状态矩阵、请求示�
 - `GET /classroom-applications/policy` → `{steps,timeout,reviewSteps,legacyReview}`；`GET /classroom-applications/{id}/history` → 逐次事件，仅申请人或管理员可读。
 - 申请：`{id,classroomId,classroomName,applicantId,applicantName,startTime,endTime,purpose,status,comment,pendingAction,lastError,currentStep,totalSteps,revision,approvalDeadline,applicantDepartment}`。状态 `PENDING,RETURNED,PROCESSING,APPROVED,REJECTED,WITHDRAWN,EXPIRED`，未确认远端前显示 PROCESSING；初审通过仍为PENDING并进入第2级。
 - `GET/POST /repair-orders`（创建 `{classroomId,description}`）。
-- `POST /repair-orders/{id}/assign` `{technicianId}`，`/start` 空对象，`/complete` `{note}`，`/accept` `{comment}`，`/return` `{comment}`。
-- 工单：`{id,classroomId,classroomName,reporterId,reporterName,technicianId,technicianName,description,status,note,comment,pendingAction,lastError}`。状态 `REPORTED,ASSIGNED,PROCESSING,IN_PROGRESS,AWAITING_ACCEPTANCE,ACCEPTED`。
+- `POST /repair-orders/{id}/assign`：首次派单 `{technicianId}`，改派 `{technicianId,reason,expectedTechnicianId}`；`/start` 空对象，`/complete` `{note}`，`/accept` `{comment}`，`/return` `{comment}`（返修原因必填）。
+- 工单：`{id,classroomId,classroomName,reporterId,reporterName,technicianId,technicianName,description,status,note,comment,pendingAction,lastError,createdAt,repairDeadline}`。旧工单截止时间可暂为空，由扫描器按原始上报时间补齐。状态 `REPORTED,ASSIGNED,PROCESSING,IN_PROGRESS,AWAITING_ACCEPTANCE,ACCEPTED`。
 - 列表：管理员看全部，申请人仅自己，工单上报人或分派维修人员可查看。维修人员只能处理分派自己的工单。
 
 ### M2 页面消费与错误反馈
@@ -72,4 +72,4 @@ M3-04 验证上报至评价闭环、返修/改派、重复和并发、超时恢�
 
 跨应用操作先落库 outbox，网络在本地事务外，再提交最终状态。网络/5xx失败保留 pendingAction/lastError，每5秒重试。新两级M2的409资源冲突也保持PROCESSING并重试，超过审批期限后转为解除补偿；旧单级M2及M3的确定性资源冲突回到先前状态。解除使用递增版本，不允许旧建立请求重新生效；被超时或撤销替代的旧意图为SUPERSEDED。
 
-M3-01验证：Java 21与PostgreSQL 18.6上流程应用43项测试通过；前端专项6项及类型检查、构建通过。覆盖旧库迁移、到期边界、并发防重、重启处理、失败回滚、跨页失败隔离及管理员查询权限。外部推送未接入；人工评审和远端CI尚未验证。
+M3增量验证（2026-11-03）：Java 21/PostgreSQL 18.6双后端91项、前端99项、真实HTTP/故障恢复/数据库隔离21项及Chromium主流程4项通过。覆盖旧库迁移、时间边界、并发防重、真实进程重启、失败回滚、跨页失败隔离、锁定工单跳过及查询权限。初始派单沿用旧请求指纹，兼容历史幂等结果。外部推送未接入；人工评审和远端CI尚未验证。

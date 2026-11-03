@@ -920,6 +920,35 @@ class WorkflowIntegrationTest {
             .statusCode());
   }
 
+  @Test
+  void m3LegacyAssignmentFingerprintStillReplaysAfterRequestFieldsExpand() throws Exception {
+    long id = reportedRepair();
+    var input = Map.of("technicianId", 4);
+    var original =
+        call("POST", "/repair-orders/" + id + "/assign", input, "admin", "legacy-assignment", true);
+    assertEquals(200, original.statusCode());
+    String oldSignature =
+        java.util.HexFormat.of()
+            .formatHex(
+                java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(
+                        JSON.writeValueAsString(input)
+                            .getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    db.update(
+        "UPDATE idempotency_results SET signature=? WHERE actor_id=3 AND action=? AND"
+            + " request_key='legacy-assignment'",
+        oldSignature,
+        "M3:" + id + ":assign");
+    var replay =
+        call("POST", "/repair-orders/" + id + "/assign", input, "admin", "legacy-assignment", true);
+    assertEquals(200, replay.statusCode());
+    assertEquals(original.body(), replay.body());
+    assertEquals(
+        1,
+        db.queryForObject(
+            "SELECT count(*) FROM repair_history WHERE repair_id=?", Integer.class, id));
+  }
+
   void assignRepair(long id) throws Exception {
     assertEquals(
         200,

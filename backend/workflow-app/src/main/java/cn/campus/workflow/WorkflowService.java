@@ -368,7 +368,12 @@ class WorkflowService {
 
   Result assign(User user, long id, String key, AssignmentInput input, String requestId) {
     Rules.admin(user);
-    Result replay = replay(user, "M3:" + id + ":assign", key, input);
+    // Preserve fingerprints persisted by the original one-field assignment request.
+    Object signatureInput =
+        input.reason() == null && input.expectedTechnicianId() == null
+            ? java.util.Collections.singletonMap("technicianId", input.technicianId())
+            : input;
+    Result replay = replay(user, "M3:" + id + ":assign", key, signatureInput);
     if (replay != null) return replay;
     if (input.technicianId() == null) throw ApiException.bad("请选择维修人员");
     User technician =
@@ -380,7 +385,7 @@ class WorkflowService {
         user,
         "M3:" + id + ":assign",
         key,
-        input,
+        signatureInput,
         requestId,
         false,
         () -> {

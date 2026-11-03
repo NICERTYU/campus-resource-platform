@@ -48,6 +48,16 @@ policy 的 steps 表示新建流程配置，已有记录的节点以自身 total
 
 审核/退回/重提使用用户确认时的revision。409后刷新并重新确认，不自动换版本重放。错误例：`{"code":"STATE_CONFLICT","message":"申请已被更新，请刷新后重新操作","requestId":"m2-conflict-example"}`。页面展示响应的真实requestId；PROCESSING的排障编号从对应revision的审批历史取得，不以客户端随机值冒充。客户端时钟到期只关闭审核并提示等待服务端确认，不能自行把状态写成EXPIRED。
 
+## M3 增量开发契约
+
+M3-03 沿用既有状态机。返修原因须由服务端校验为1至1000字；改派只允许ASSIGNED，须提供原维修人员expectedTechnicianId、新technicianId及1至1000字reason。原首次派单请求保持兼容；过期负责人、非法状态返回409，权限不足403。`GET /repair-orders/{id}/history`仅管理员、报修人和当前维修人员可读，保留逐次原因、人员变化、操作者、时间和请求号。
+
+M3-01 默认处理期限为PT24H、扫描间隔60000毫秒，可经M3_REPAIR_TIMEOUT、M3_REPAIR_SCAN_MS调整。上报时固定截止时间，修改配置仅影响新工单；旧工单缺少截止时间时按created_at与首次处理时配置补齐。REPORTED、ASSIGNED、IN_PROGRESS及PROCESSING/START适用，到达截止时间触发一次一级升级；待验收和已验收不升级。返修不重置期限。升级与管理员站内提醒是同一条持久化事件，具有工单/级别唯一约束；页面显示不代表邮件或微信送达。不复用资源限制outbox，不变更维修状态或资源版本。部署首次启用可能升级旧积压工单，应由管理员评估。
+
+M3-02 `POST /repair-orders/{id}/review`接受`{rating,comment}`：rating为1至5整数，comment可空且最多1000字；仅报修人对ACCEPTED工单评价，每单一次。相同幂等键和内容返回原结果；重复评价409、越权403、无效输入400。`GET /repair-orders/{id}/review`仅管理员或报修人可读，未评价返回204。评价保留评价人和时间，不对外公开或改变维修状态。
+
+M3-04 验证上报至评价闭环、返修/改派、重复和并发、超时恢复，以及无其他占用干扰的多个维修来源。沿用现有HTTP和outbox契约；公共通知推送仍由公共层维护，站内事件不冒充外部送达。
+
 ## 内部接口
 
 只在容器网络提供，均必须带 `X-Module-Key`。环境变量 `MODULE_KEY`，至少32字符；浏览器无法通过公共 Nginx 访问内部接口。

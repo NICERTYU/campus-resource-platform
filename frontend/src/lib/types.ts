@@ -84,6 +84,13 @@ export interface RepairHistory {
   requestId: string
   createdAt: string
 }
+export interface RepairReview {
+  repairId: number
+  reviewerId: number
+  rating: number
+  comment: string | null
+  reviewedAt: string
+}
 export interface RepairEscalation {
   id: number
   repairId: number

@@ -8,7 +8,63 @@ import StatusTag from '../components/StatusTag.vue'
 import { useAuth } from '../stores/auth'
 import { request, write, errorMessage } from '../lib/api'
 import { dateTime } from '../lib/time'
-import type { Repair, RepairHistory, RepairEscalation, Classroom, User } from '../lib/types'
+import type {
+  Repair,
+  RepairHistory,
+  RepairEscalation,
+  RepairReview,
+  Classroom,
+  User,
+} from '../lib/types'
+const reviews = ref<Record<number, RepairReview>>({})
+const reviewRecord = ref<Repair | null>(null)
+const rating = ref<number | undefined>(5)
+const reviewComment = ref('')
+const reviewSaving = ref(false)
+const reviewLoadingId = ref<number | null>(null)
+async function openReview(record: Repair) {
+  if (reviewLoadingId.value !== null) return
+  reviewLoadingId.value = record.id
+  try {
+    const existing = await request<RepairReview | undefined>(`/repair-orders/${record.id}/review`)
+    if (existing) reviews.value[record.id] = existing
+    else if (auth.user?.id === record.reporterId) {
+      reviewRecord.value = record
+      rating.value = 5
+      reviewComment.value = ''
+    } else ElMessage.info('报修人尚未提交评价')
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  } finally {
+    reviewLoadingId.value = null
+  }
+}
+async function submitReview() {
+  if (!reviewRecord.value || reviewSaving.value) return
+  if (
+    !Number.isInteger(rating.value) ||
+    rating.value! < 1 ||
+    rating.value! > 5 ||
+    reviewComment.value.trim().length > 1000
+  ) {
+    ElMessage.warning('评分须为1至5的整数，评价内容最多1000字')
+    return
+  }
+  reviewSaving.value = true
+  try {
+    const record = reviewRecord.value
+    reviews.value[record.id] = await write<RepairReview>(`/repair-orders/${record.id}/review`, {
+      rating: rating.value,
+      comment: reviewComment.value.trim(),
+    })
+    reviewRecord.value = null
+    ElMessage.success('评价已提交')
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  } finally {
+    reviewSaving.value = false
+  }
+}
 const escalations = ref<RepairEscalation[]>([])
 const escalationError = ref('')
 let loadingEscalations = false
@@ -231,6 +287,14 @@ onUnmounted(() => clearInterval(poll))
         :closable="false"
       /><el-alert v-if="r.lastError" :title="r.lastError" type="warning" :closable="false" />
       <div class="workflow-actions">
+        <el-button
+          v-if="r.status === 'ACCEPTED' && (auth.isAdmin || auth.user?.id === r.reporterId)"
+          :loading="reviewLoadingId === r.id"
+          @click="openReview(r)"
+          >{{
+            reviews[r.id] || auth.user?.id !== r.reporterId ? '查看评价' : '维修评价'
+          }}</el-button
+        >
         <el-button @click="showHistory(r.id)">派单与返修记录</el-button>
         <el-button
           v-if="auth.isAdmin && ['REPORTED', 'ASSIGNED'].includes(r.status)"
@@ -256,6 +320,10 @@ onUnmounted(() => clearInterval(poll))
           ><el-button @click="openAction(r, 'return')">退回维修</el-button></template
         >
       </div>
+      <p v-if="reviews[r.id]" class="muted" data-testid="repair-review">
+        维修评价：{{ reviews[r.id]!.rating }}/5 · {{ reviews[r.id]!.comment || '无文字评价' }} ·
+        {{ dateTime(reviews[r.id]!.reviewedAt) }}
+      </p>
       <p v-for="h in histories[r.id]" :key="h.id" class="muted">
         {{ h.actorName }} ·
         {{ h.action === 'RETURN' ? '退回维修' : h.action === 'REASSIGN' ? '改派' : '派单' }} ·
@@ -274,6 +342,47 @@ onUnmounted(() => clearInterval(poll))
       @change="(page) => load(false, page)"
     />
   </section>
+  <el-dialog
+    :model-value="!!reviewRecord"
+    title="维修评价"
+    width="470px"
+    :show-close="!reviewSaving"
+    :close-on-click-modal="!reviewSaving"
+    :close-on-press-escape="!reviewSaving"
+    @close="
+      () => {
+        if (!reviewSaving) reviewRecord = null
+      }
+    "
+  >
+    <p>{{ reviewRecord?.classroomName }} · 工单 #{{ reviewRecord?.id }}</p>
+    <el-form label-position="top">
+      <el-form-item label="评分（1至5分）">
+        <el-input-number
+          v-model="rating"
+          :min="1"
+          :max="5"
+          :step="1"
+          :precision="0"
+          aria-label="维修评分"
+        />
+      </el-form-item>
+      <el-form-item label="评价内容（可选）">
+        <el-input
+          v-model="reviewComment"
+          type="textarea"
+          :rows="3"
+          maxlength="1000"
+          show-word-limit
+          placeholder="评价内容（可选，最多1000字）"
+        />
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button :disabled="reviewSaving" @click="reviewRecord = null">取消</el-button>
+      <el-button type="primary" :loading="reviewSaving" @click="submitReview">提交评价</el-button>
+    </template>
+  </el-dialog>
   <el-dialog v-model="createOpen" title="上报教室故障" width="500px"
     ><el-form label-position="top"
       ><el-form-item label="故障所在教室"

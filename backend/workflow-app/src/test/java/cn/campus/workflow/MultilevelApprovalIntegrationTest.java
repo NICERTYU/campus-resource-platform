@@ -81,6 +81,7 @@ class MultilevelApprovalIntegrationTest {
     r.add("workflow.resource-url", () -> "http://localhost:" + RESOURCE.getAddress().getPort());
     r.add("workflow.module-key", () -> "multilevel-test-secret-at-least-32-characters");
     r.add("workflow.retry-delay-ms", () -> "3600000");
+    r.add("workflow.repair.scan-ms", () -> "3600000");
     r.add("workflow.approval.expiry-scan-ms", () -> "3600000");
     r.add("workflow.approval.first-reviewer-ids", () -> "11");
     r.add("workflow.approval.final-reviewer-ids", () -> "12");

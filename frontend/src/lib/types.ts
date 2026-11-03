@@ -84,6 +84,14 @@ export interface RepairHistory {
   requestId: string
   createdAt: string
 }
+export interface RepairEscalation {
+  id: number
+  repairId: number
+  level: number
+  deadline: string
+  escalatedAt: string
+  notificationStatus: 'AVAILABLE'
+}
 export interface Repair {
   id: number
   classroomId: number
@@ -92,6 +100,8 @@ export interface Repair {
   reporterName: string
   technicianId: number | null
   technicianName: string | null
+  createdAt?: string
+  repairDeadline?: string | null
   description: string
   status: string
   note: string | null

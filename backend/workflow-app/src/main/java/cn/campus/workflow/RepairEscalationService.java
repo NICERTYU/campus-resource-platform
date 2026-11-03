@@ -64,4 +64,24 @@ class RepairEscalationService {
     if (changed) LOG.info("Repair escalated repairId={} level=1 requestId={}", id, requestId);
     return changed;
   }
+
+  java.util.List<Model.RepairEscalation> list(Model.User user, int page, int pageSize) {
+    Rules.admin(user);
+    long offset = Rules.pageOffset(page, pageSize);
+    return repo.jdbc()
+        .query(
+            "SELECT * FROM repair_escalations ORDER BY escalated_at DESC,id DESC LIMIT ? OFFSET ?",
+            (r, n) ->
+                new Model.RepairEscalation(
+                    r.getLong("id"),
+                    r.getLong("repair_id"),
+                    r.getInt("level"),
+                    r.getString("observed_status"),
+                    time(r, "deadline"),
+                    time(r, "escalated_at"),
+                    r.getString("request_id"),
+                    r.getString("notification_status")),
+            pageSize,
+            offset);
+  }
 }

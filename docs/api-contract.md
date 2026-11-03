@@ -56,6 +56,8 @@ M3-01 默认处理期限为PT24H、扫描间隔60000毫秒，可经M3_REPAIR_TIM
 
 M3-02 `POST /repair-orders/{id}/review`接受`{rating,comment}`：rating为1至5整数，comment可空且最多1000字；仅报修人对ACCEPTED工单评价，每单一次。相同幂等键和内容返回原结果；重复评价409、越权403、无效输入400。`GET /repair-orders/{id}/review`仅管理员或报修人可读，未评价返回204。评价保留评价人和时间，不对外公开或改变维修状态。
 
+`GET /repair-orders/escalations?page=1&pageSize=50`仅ADMIN可读，分页规则沿用现有列表，按升级时间、ID倒序返回`{id,repairId,level,observedStatus,deadline,escalatedAt,requestId,notificationStatus}`。AVAILABLE仅表示站内提醒已持久化、可供管理员查询，不表示外部通知送达。扫描采用ID分页并逐单事务处理，失败记录不会阻塞后续分页。
+
 M3-04 验证上报至评价闭环、返修/改派、重复和并发、超时恢复，以及无其他占用干扰的多个维修来源。沿用现有HTTP和outbox契约；公共通知推送仍由公共层维护，站内事件不冒充外部送达。
 
 ## 内部接口

@@ -99,6 +99,16 @@ final class Model {
       OffsetDateTime createdAt,
       OffsetDateTime repairDeadline) {}
 
+  record RepairEscalation(
+      long id,
+      long repairId,
+      int level,
+      String observedStatus,
+      OffsetDateTime deadline,
+      OffsetDateTime escalatedAt,
+      String requestId,
+      String notificationStatus) {}
+
   record Restriction(
       long version,
       boolean active,

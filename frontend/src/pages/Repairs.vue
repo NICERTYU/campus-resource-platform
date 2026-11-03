@@ -7,7 +7,28 @@ import { usePagination } from '../lib/pagination'
 import StatusTag from '../components/StatusTag.vue'
 import { useAuth } from '../stores/auth'
 import { request, write, errorMessage } from '../lib/api'
-import type { Repair, RepairHistory, Classroom, User } from '../lib/types'
+import { dateTime } from '../lib/time'
+import type { Repair, RepairHistory, RepairEscalation, Classroom, User } from '../lib/types'
+const escalations = ref<RepairEscalation[]>([])
+const escalationError = ref('')
+let loadingEscalations = false
+async function loadEscalations() {
+  if (!auth.isAdmin || loadingEscalations) return
+  loadingEscalations = true
+  try {
+    escalations.value = await request<RepairEscalation[]>(
+      '/repair-orders/escalations?page=1&pageSize=10',
+    )
+    escalationError.value = ''
+  } catch (e) {
+    escalationError.value = errorMessage(e)
+  } finally {
+    loadingEscalations = false
+  }
+}
+async function refresh() {
+  await Promise.all([load(), loadEscalations()])
+}
 const histories = ref<Record<number, RepairHistory[]>>({})
 async function showHistory(id: number) {
   try {
@@ -127,6 +148,7 @@ const actionName: Record<string, string> = {
 }
 onMounted(async () => {
   await load()
+  await loadEscalations()
   try {
     rooms.value = await request<Classroom[]>('/classrooms')
     roomId.value = rooms.value[0]?.id
@@ -139,6 +161,7 @@ onMounted(async () => {
   }
   poll = setInterval(() => {
     if (!loading.value && records.value.some((r) => r.status === 'PROCESSING')) void load(true)
+    void loadEscalations()
   }, 5000)
 })
 onUnmounted(() => clearInterval(poll))
@@ -154,7 +177,7 @@ onUnmounted(() => clearInterval(poll))
           ? '查看分派给你的工单，更新维修进度并提交完工。'
           : '遇到空间故障？告诉我们，让问题尽快得到处理。'
     "
-    ><el-button @click="load()" :loading="loading">刷新</el-button
+    ><el-button @click="refresh" :loading="loading">刷新</el-button
     ><el-button type="primary" @click="createOpen = true">＋ 上报故障</el-button></PageHeading
   >
   <div class="info-banner">
@@ -166,6 +189,20 @@ onUnmounted(() => clearInterval(poll))
     </p>
   </div>
   <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
+  <el-alert
+    v-if="escalationError"
+    :title="'超时提醒加载失败：' + escalationError"
+    type="warning"
+    :closable="false"
+  />
+  <section v-if="auth.isAdmin && escalations.length" class="surface" aria-label="工单超时升级提醒">
+    <h3>超时升级提醒</h3>
+    <p class="muted">最近10条管理员站内提醒。</p>
+    <p v-for="event in escalations" :key="event.id">
+      工单 #{{ event.repairId }} 已超处理期限（{{ dateTime(event.deadline) }}），请跟进。
+      <small>升级时间：{{ dateTime(event.escalatedAt) }}</small>
+    </p>
+  </section>
   <section class="surface" v-loading="loading">
     <div class="section-kicker">
       {{ auth.isAdmin ? '报修工单台' : auth.has('TECHNICIAN') ? '我的维修任务' : '我的报修记录' }}
@@ -186,6 +223,7 @@ onUnmounted(() => clearInterval(poll))
       </div>
       <p class="muted" v-if="r.note">完工说明：{{ r.note }}</p>
       <p class="muted" v-if="r.comment">验收意见：{{ r.comment }}</p>
+      <p class="muted" v-if="r.repairDeadline">处理期限：{{ dateTime(r.repairDeadline) }}</p>
       <el-alert
         v-if="r.pendingAction"
         title="正在同步资源状态，请稍后查看。"
@@ -221,7 +259,7 @@ onUnmounted(() => clearInterval(poll))
       <p v-for="h in histories[r.id]" :key="h.id" class="muted">
         {{ h.actorName }} ·
         {{ h.action === 'RETURN' ? '退回维修' : h.action === 'REASSIGN' ? '改派' : '派单' }} ·
-        {{ new Date(h.createdAt).toLocaleString('zh-CN') }}
+        {{ dateTime(h.createdAt) }}
         <span v-if="h.previousTechnicianId"> · 原维修人员 #{{ h.previousTechnicianId }}</span>
         <span v-if="h.technicianId"> · 维修人员 #{{ h.technicianId }}</span>
         <span v-if="h.reason"> · {{ h.reason }}</span>

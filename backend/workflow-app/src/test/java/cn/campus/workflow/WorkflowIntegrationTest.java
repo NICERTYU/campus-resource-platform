@@ -54,6 +54,7 @@ class WorkflowIntegrationTest {
   @Autowired ResourceClient resourceClient;
   @Autowired TransactionTemplate transactions;
   @Autowired RepairEscalationService escalation;
+  @Autowired RepairTimeoutScanner repairScanner;
   private final HttpClient browser = HttpClient.newHttpClient();
 
   @AfterAll
@@ -70,6 +71,7 @@ class WorkflowIntegrationTest {
         "workflow.resource-url", () -> "http://localhost:" + RESOURCE.getAddress().getPort());
     registry.add("workflow.module-key", () -> MODULE_KEY);
     registry.add("workflow.retry-delay-ms", () -> "3600000");
+    registry.add("workflow.repair.scan-ms", () -> "3600000");
     registry.add("workflow.approval.steps", () -> "1");
     registry.add("workflow.approval.expiry-scan-ms", () -> "3600000");
   }
@@ -642,6 +644,98 @@ class WorkflowIntegrationTest {
       db.execute("DROP FUNCTION fail_reminder()");
     }
     assertTrue(escalation.escalate(id));
+  }
+
+  @Test
+  void m3ScannerPersistsReminderOnceAndInboxRequiresAdministrator() throws Exception {
+    long id = reportedRepair();
+    long ended = reportedRepair();
+    db.update("UPDATE repair_orders SET repair_deadline=CURRENT_TIMESTAMP-INTERVAL '1 day'");
+    db.update("UPDATE repair_orders SET status='AWAITING_ACCEPTANCE' WHERE id=?", ended);
+    repairScanner.scan();
+    repairScanner.scan();
+    var events = parse(call("GET", "/repair-orders/escalations", null, "admin", null, false));
+    assertEquals(1, events.size());
+    assertEquals(id, events.get(0).path("repairId").asLong());
+    assertEquals("AVAILABLE", events.get(0).path("notificationStatus").asText());
+    assertEquals(
+        403, call("GET", "/repair-orders/escalations", null, "student", null, false).statusCode());
+    assertEquals(
+        403, call("GET", "/repair-orders/escalations", null, "tech", null, false).statusCode());
+    assertEquals(
+        401, call("GET", "/repair-orders/escalations", null, null, null, false).statusCode());
+    assertEquals(
+        400,
+        call("GET", "/repair-orders/escalations?page=0", null, "admin", null, false).statusCode());
+    assertEquals(
+        0,
+        parse(
+                call(
+                    "GET",
+                    "/repair-orders/escalations?page=2&pageSize=1",
+                    null,
+                    "admin",
+                    null,
+                    false))
+            .size());
+    assertEquals(0, COMMANDS.get());
+  }
+
+  @Test
+  void m3ScannerFailureCannotStarveLaterPagesAndFreshScannerRecovers() {
+    db.update(
+        """
+        INSERT INTO repair_orders(classroom_id,classroom_name,reporter_id,reporter_name,description,status,repair_deadline)
+        SELECT 1,'A101',1,'student','scan','REPORTED',CURRENT_TIMESTAMP-INTERVAL '1 day'
+        FROM generate_series(1,101)
+        """);
+    db.execute(
+        "CREATE FUNCTION fail_first_reminder() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF"
+            + " NEW.repair_id=1 THEN RAISE EXCEPTION 'first reminder failure'; END IF; RETURN NEW;"
+            + " END $$");
+    db.execute(
+        "CREATE TRIGGER fail_first_reminder BEFORE INSERT ON repair_escalations FOR EACH ROW"
+            + " EXECUTE FUNCTION fail_first_reminder()");
+    try {
+      repairScanner.scan();
+      assertEquals(
+          100, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
+      assertEquals(
+          1,
+          db.queryForObject(
+              "SELECT count(*) FROM repair_escalations WHERE repair_id=101", Integer.class));
+      repairScanner.scan();
+      assertEquals(
+          100, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
+    } finally {
+      db.execute("DROP TRIGGER fail_first_reminder ON repair_escalations");
+      db.execute("DROP FUNCTION fail_first_reminder()");
+    }
+    new RepairTimeoutScanner(repository, escalation, java.time.Clock.systemUTC()).scan();
+    assertEquals(101, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
+  }
+
+  @Test
+  void m3CompletionWinningRowLockPreventsEscalationFromStaleCandidate() throws Exception {
+    long id = reportedRepair();
+    assignRepair(id);
+    call("POST", "/repair-orders/" + id + "/start", Map.of(), "tech", null, true);
+    db.update(
+        "UPDATE repair_orders SET repair_deadline=CURRENT_TIMESTAMP-INTERVAL '1 day' WHERE id=?",
+        id);
+    try (var pool = java.util.concurrent.Executors.newSingleThreadExecutor()) {
+      var future =
+          new java.util.concurrent.atomic.AtomicReference<java.util.concurrent.Future<Boolean>>();
+      transactions.executeWithoutResult(
+          status -> {
+            repository.locked("M3", id);
+            future.set(pool.submit(() -> escalation.escalate(id)));
+            db.update("UPDATE repair_orders SET status='AWAITING_ACCEPTANCE' WHERE id=?", id);
+          });
+      assertFalse(future.get().get(10, java.util.concurrent.TimeUnit.SECONDS));
+    }
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
+    assertTrue(RESTRICTIONS.get("M3/" + id).path("active").asBoolean());
   }
 
   void assignRepair(long id) throws Exception {

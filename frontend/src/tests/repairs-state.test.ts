@@ -21,6 +21,7 @@ beforeEach(() => {
   }
   vi.resetAllMocks()
   vi.mocked(request).mockImplementation(async (path) => {
+    if (path.startsWith('/repair-orders/escalations')) return []
     if (path === '/classrooms') return []
     if (path.includes('/admin/users'))
       return [{ id: 6, displayName: '新维修人员', roles: ['TECHNICIAN'] }]
@@ -105,6 +106,61 @@ it('loads and displays immutable repair reasons on demand', async () => {
     expect(request).toHaveBeenCalledWith('/repair-orders/9/history')
     expect(wrapper.text()).toContain('仍然漏水')
     expect(wrapper.text()).toContain('退回维修')
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('shows persisted administrator reminders with their repair number', async () => {
+  const fallback = vi.mocked(request).getMockImplementation()!
+  vi.mocked(request).mockImplementation(async (path) =>
+    path.startsWith('/repair-orders/escalations')
+      ? [
+          {
+            id: 1,
+            repairId: 9,
+            deadline: '2026-11-03T00:00:00Z',
+            escalatedAt: '2026-11-03T01:00:00Z',
+            notificationStatus: 'AVAILABLE',
+          },
+        ]
+      : fallback(path),
+  )
+  const wrapper = page()
+  try {
+    await flushPromises()
+    expect(wrapper.find('[aria-label="工单超时升级提醒"]').text()).toContain('工单 #9')
+    expect(wrapper.text()).toContain('请跟进')
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('keeps the repair list usable when the reminder request fails', async () => {
+  const fallback = vi.mocked(request).getMockImplementation()!
+  vi.mocked(request).mockImplementation(async (path) => {
+    if (path.startsWith('/repair-orders/escalations')) throw new Error('unavailable')
+    return fallback(path)
+  })
+  const wrapper = page()
+  try {
+    await flushPromises()
+    expect(wrapper.text()).toContain('超时提醒加载失败')
+    expect(wrapper.text()).toContain('A101')
+    expect(wrapper.findAll('button').some((b) => b.text() === '改派')).toBe(true)
+  } finally {
+    wrapper.unmount()
+  }
+})
+
+it('does not request the administrator inbox for a student', async () => {
+  useAuth().user!.roles = ['STUDENT']
+  const wrapper = page()
+  try {
+    await flushPromises()
+    expect(
+      vi.mocked(request).mock.calls.some(([path]) => path.startsWith('/repair-orders/escalations')),
+    ).toBe(false)
   } finally {
     wrapper.unmount()
   }

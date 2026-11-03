@@ -32,8 +32,13 @@ class RepairEscalationService {
         Boolean.TRUE.equals(
             tx.execute(
                 status -> {
-                  // The same row lock is used by completion, reassignment and acceptance.
-                  var row = repo.locked("M3", id);
+                  // Busy work is retried next scan; do not block unrelated repairs behind it.
+                  var rows =
+                      repo.jdbc()
+                          .queryForList(
+                              "SELECT * FROM repair_orders WHERE id=? FOR UPDATE SKIP LOCKED", id);
+                  if (rows.isEmpty()) return false;
+                  var row = rows.getFirst();
                   String current = string(row, "status");
                   if (!RepairTimeoutPolicy.eligible(current, string(row, "pending_action")))
                     return false;

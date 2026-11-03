@@ -949,6 +949,39 @@ class WorkflowIntegrationTest {
             "SELECT count(*) FROM repair_history WHERE repair_id=?", Integer.class, id));
   }
 
+  @Test
+  void m3LockedRepairCannotBlockUnrelatedOverdueWork() throws Exception {
+    long busy = reportedRepair();
+    long peer = reportedRepair();
+    db.update("UPDATE repair_orders SET repair_deadline=CURRENT_TIMESTAMP-INTERVAL '1 day'");
+    try (var pool = java.util.concurrent.Executors.newSingleThreadExecutor()) {
+      transactions.executeWithoutResult(
+          status -> {
+            repository.locked("M3", busy);
+            var scan = pool.submit(() -> repairScanner.scan());
+            try {
+              scan.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (Exception error) {
+              throw new RuntimeException("A locked repair blocked its peer", error);
+            }
+            assertEquals(
+                1,
+                db.queryForObject(
+                    "SELECT count(*) FROM repair_escalations WHERE repair_id=?",
+                    Integer.class,
+                    peer));
+            assertEquals(
+                0,
+                db.queryForObject(
+                    "SELECT count(*) FROM repair_escalations WHERE repair_id=?",
+                    Integer.class,
+                    busy));
+          });
+    }
+    repairScanner.scan();
+    assertEquals(2, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
+  }
+
   void assignRepair(long id) throws Exception {
     assertEquals(
         200,

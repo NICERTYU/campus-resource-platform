@@ -73,6 +73,17 @@ export interface ApprovalHistory {
   requestId: string
   createdAt: string
 }
+export interface RepairHistory {
+  id: number
+  action: string
+  actorId: number
+  actorName: string
+  previousTechnicianId: number | null
+  technicianId: number | null
+  reason: string | null
+  requestId: string
+  createdAt: string
+}
 export interface Repair {
   id: number
   classroomId: number

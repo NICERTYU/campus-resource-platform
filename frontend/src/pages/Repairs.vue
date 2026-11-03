@@ -7,7 +7,15 @@ import { usePagination } from '../lib/pagination'
 import StatusTag from '../components/StatusTag.vue'
 import { useAuth } from '../stores/auth'
 import { request, write, errorMessage } from '../lib/api'
-import type { Repair, Classroom, User } from '../lib/types'
+import type { Repair, RepairHistory, Classroom, User } from '../lib/types'
+const histories = ref<Record<number, RepairHistory[]>>({})
+async function showHistory(id: number) {
+  try {
+    histories.value[id] = await request<RepairHistory[]>(`/repair-orders/${id}/history`)
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  }
+}
 const auth = useAuth(),
   records = ref<Repair[]>([]),
   rooms = ref<Classroom[]>([]),
@@ -74,6 +82,10 @@ async function execute() {
     ElMessage.warning('请选择维修人员')
     return
   }
+  if (type === 'assign' && action.value.record.status === 'ASSIGNED' && !text.value.trim()) {
+    ElMessage.warning('请填写改派原因')
+    return
+  }
   if (['complete', 'return'].includes(type) && !text.value.trim()) {
     ElMessage.warning(type === 'return' ? '请填写返修原因' : '请填写完工说明')
     return
@@ -82,7 +94,15 @@ async function execute() {
   try {
     const body =
       type === 'assign'
-        ? { technicianId: technicianId.value }
+        ? {
+            technicianId: technicianId.value,
+            ...(action.value.record.status === 'ASSIGNED'
+              ? {
+                  reason: text.value.trim(),
+                  expectedTechnicianId: action.value.record.technicianId,
+                }
+              : {}),
+          }
         : type === 'start'
           ? {}
           : type === 'complete'
@@ -173,6 +193,7 @@ onUnmounted(() => clearInterval(poll))
         :closable="false"
       /><el-alert v-if="r.lastError" :title="r.lastError" type="warning" :closable="false" />
       <div class="workflow-actions">
+        <el-button @click="showHistory(r.id)">派单与返修记录</el-button>
         <el-button
           v-if="auth.isAdmin && ['REPORTED', 'ASSIGNED'].includes(r.status)"
           type="primary"
@@ -197,6 +218,14 @@ onUnmounted(() => clearInterval(poll))
           ><el-button @click="openAction(r, 'return')">退回维修</el-button></template
         >
       </div>
+      <p v-for="h in histories[r.id]" :key="h.id" class="muted">
+        {{ h.actorName }} ·
+        {{ h.action === 'RETURN' ? '退回维修' : h.action === 'REASSIGN' ? '改派' : '派单' }} ·
+        {{ new Date(h.createdAt).toLocaleString('zh-CN') }}
+        <span v-if="h.previousTechnicianId"> · 原维修人员 #{{ h.previousTechnicianId }}</span>
+        <span v-if="h.technicianId"> · 维修人员 #{{ h.technicianId }}</span>
+        <span v-if="h.reason"> · {{ h.reason }}</span>
+      </p>
     </div>
     <el-empty v-if="!records.length" description="暂无报修工单" :image-size="90" />
     <PagePager
@@ -237,15 +266,22 @@ onUnmounted(() => clearInterval(poll))
     <el-select v-if="action?.type === 'assign'" v-model="technicianId" placeholder="选择维修人员"
       ><el-option v-for="u in technicians" :key="u.id" :value="u.id" :label="u.displayName"
     /></el-select>
+    <el-input
+      v-if="action?.type === 'assign' && action.record.status === 'ASSIGNED'"
+      v-model="text"
+      type="textarea"
+      maxlength="1000"
+      placeholder="填写改派原因"
+    />
     <p v-else-if="action?.type === 'start'" class="muted">
       开始维修后该教室整体暂停预约。已有记录保留，维修期间无法签到。
     </p>
     <el-input
-      v-else
+      v-else-if="action?.type !== 'assign'"
       v-model="text"
       type="textarea"
       :rows="3"
-      maxlength="2000"
+      :maxlength="action?.type === 'complete' ? 2000 : 1000"
       :placeholder="
         action?.type === 'complete'
           ? '填写维修结果和完工说明'

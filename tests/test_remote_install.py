@@ -20,6 +20,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 args = sys.argv[1:]
 def record(**extra):
@@ -27,6 +28,8 @@ def record(**extra):
         output.write(json.dumps({"args": args, "commit": os.environ.get("BUILD_COMMIT"), **extra}) + "\n")
 
 if args == ["load"]:
+    if os.environ.get("FAKE_LOAD_STALL") == "1":
+        time.sleep(30)
     record(image_bytes=len(sys.stdin.buffer.read()))
     sys.exit(0)
 if "up" in args:
@@ -37,6 +40,8 @@ if "up" in args:
         record(consumed=len(sys.stdin.read()))
     sys.exit(0)
 if "exec" in args:
+    if "psql" in args and os.environ.get("FAKE_MIGRATIONS_FAIL") == "1":
+        sys.exit(19)
     if "--interactive=false" not in args:
         record(consumed=len(sys.stdin.read()))
     else:
@@ -128,6 +133,34 @@ class RemoteInstallTests(unittest.TestCase):
         self.assertFalse(self.migrations.exists())
         commands = [json.loads(line) for line in self.log.read_text().splitlines()]
         self.assertFalse(any("exec" in command["args"] for command in commands))
+
+    def test_failed_migration_query_keeps_previous_release_records(self):
+        self.deploy_root.mkdir()
+        self.current.write_text(OLD_REVISION + "\n")
+        self.previous.write_text("c" * 40 + "\n")
+        result = self.install(FAKE_MIGRATIONS_FAIL="1")
+        self.assertEqual(result.returncode, 19, result.stderr)
+        self.assertIn("FAILED: verify database migration history", result.stderr)
+        self.assertEqual(self.current.read_text(), OLD_REVISION + "\n")
+        self.assertEqual(self.previous.read_text(), "c" * 40 + "\n")
+        self.assertFalse(self.migrations.exists())
+
+    def test_stalled_image_load_times_out_without_recording_success(self):
+        real_timeout = shutil.which("timeout")
+        self.assertIsNotNone(real_timeout, "Linux release tests require GNU timeout")
+        # Keep the production image-load budget; shorten it only in the test CLI.
+        timeout = self.home / "bin" / "timeout"
+        timeout.write_text(
+            "#!/usr/bin/env python3\nimport os,sys\n"
+            "args = ['1s' if value == '300s' else value for value in sys.argv[1:]]\n"
+            "os.execv(" + repr(real_timeout) + ", ['timeout', *args])\n"
+        )
+        timeout.chmod(0o755)
+        result = self.install(FAKE_LOAD_STALL="1")
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertIn("FAILED: load verified Docker images", result.stderr)
+        self.assertFalse(self.current.exists())
+        self.assertFalse(self.migrations.exists())
 
 
 if __name__ == "__main__":

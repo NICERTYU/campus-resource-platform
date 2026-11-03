@@ -53,6 +53,7 @@ class WorkflowIntegrationTest {
   @Autowired WorkflowRepository repository;
   @Autowired ResourceClient resourceClient;
   @Autowired TransactionTemplate transactions;
+  @Autowired RepairEscalationService escalation;
   private final HttpClient browser = HttpClient.newHttpClient();
 
   @AfterAll
@@ -77,7 +78,7 @@ class WorkflowIntegrationTest {
   void clean() {
     db.execute(
         "TRUNCATE"
-            + " repair_history,application_history,idempotency_results,outbox,audit_logs,classroom_applications,repair_orders"
+            + " repair_escalations,repair_history,application_history,idempotency_results,outbox,audit_logs,classroom_applications,repair_orders"
             + " RESTART IDENTITY");
     REMOTE_STATUS.set(200);
     COMMANDS.set(0);
@@ -497,6 +498,150 @@ class WorkflowIntegrationTest {
                 java.time.OffsetDateTime.class,
                 record.path("id").asLong())
             .toInstant());
+  }
+
+  @Test
+  void m3TimeoutBoundaryIsIdempotentAndKeepsRepairAndRestrictionVersions() throws Exception {
+    long id = reportedRepair();
+    assignRepair(id);
+    call("POST", "/repair-orders/" + id + "/start", Map.of(), "tech", null, true);
+    var deadline = java.time.OffsetDateTime.parse("2026-11-03T01:00:00Z");
+    db.update("UPDATE repair_orders SET repair_deadline=? WHERE id=?", deadline, id);
+    var before =
+        db.queryForMap(
+            "SELECT status,source_version,restriction_start,pending_action FROM repair_orders WHERE"
+                + " id=?",
+            id);
+    var policy = new RepairTimeoutPolicy(java.time.Duration.ofHours(1), 1000);
+    var earlier =
+        new RepairEscalationService(
+            repository,
+            transactions,
+            policy,
+            java.time.Clock.fixed(deadline.toInstant().minusNanos(1000), java.time.ZoneOffset.UTC));
+    assertFalse(earlier.escalate(id));
+    var atBoundary =
+        new RepairEscalationService(
+            repository,
+            transactions,
+            policy,
+            java.time.Clock.fixed(deadline.toInstant(), java.time.ZoneOffset.UTC));
+    assertTrue(atBoundary.escalate(id));
+    assertFalse(atBoundary.escalate(id));
+    assertEquals(
+        before,
+        db.queryForMap(
+            "SELECT status,source_version,restriction_start,pending_action FROM repair_orders WHERE"
+                + " id=?",
+            id));
+    assertTrue(RESTRICTIONS.get("M3/" + id).path("active").asBoolean());
+    assertEquals(1, COMMANDS.get());
+    var event = db.queryForMap("SELECT * FROM repair_escalations WHERE repair_id=?", id);
+    assertEquals("AVAILABLE", event.get("notification_status"));
+    assertNotNull(event.get("request_id"));
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
+  }
+
+  @Test
+  void m3EscalationRechecksCompletedStateAndRecoversLegacyDeadlineAfterRestart() throws Exception {
+    long id = reportedRepair();
+    var start = java.time.OffsetDateTime.parse("2026-11-01T00:00:00Z");
+    db.update("UPDATE repair_orders SET created_at=?,repair_deadline=NULL WHERE id=?", start, id);
+    var fixed = java.time.Clock.fixed(start.plusHours(2).toInstant(), java.time.ZoneOffset.UTC);
+    var oneHour = new RepairTimeoutPolicy(java.time.Duration.ofHours(1), 1000);
+    var restarted = new RepairEscalationService(repository, transactions, oneHour, fixed);
+    assertTrue(restarted.escalate(id));
+    var saved =
+        db.queryForObject(
+            "SELECT repair_deadline FROM repair_orders WHERE id=?",
+            java.time.OffsetDateTime.class,
+            id);
+    assertEquals(start.plusHours(1).toInstant(), saved.toInstant());
+    assertFalse(
+        new RepairEscalationService(
+                repository,
+                transactions,
+                new RepairTimeoutPolicy(java.time.Duration.ofDays(7), 1000),
+                fixed)
+            .escalate(id));
+    assertEquals(
+        saved,
+        db.queryForObject(
+            "SELECT repair_deadline FROM repair_orders WHERE id=?",
+            java.time.OffsetDateTime.class,
+            id));
+    for (String state : java.util.List.of("AWAITING_ACCEPTANCE", "ACCEPTED", "PROCESSING")) {
+      long done = reportedRepair();
+      db.update(
+          "UPDATE repair_orders SET status=?,pending_action='ACCEPT',repair_deadline=? WHERE id=?",
+          state,
+          start,
+          done);
+      assertFalse(restarted.escalate(done));
+    }
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
+  }
+
+  @Test
+  void m3ConcurrentEscalationsPersistExactlyOneAdministratorReminder() throws Exception {
+    long id = reportedRepair();
+    db.update(
+        "UPDATE repair_orders SET repair_deadline=CURRENT_TIMESTAMP-INTERVAL '1 day' WHERE id=?",
+        id);
+    var barrier = new java.util.concurrent.CyclicBarrier(4);
+    try (var pool = java.util.concurrent.Executors.newFixedThreadPool(4)) {
+      var futures = new java.util.ArrayList<java.util.concurrent.Future<Boolean>>();
+      for (int i = 0; i < 4; i++)
+        futures.add(
+            pool.submit(
+                () -> {
+                  barrier.await();
+                  return escalation.escalate(id);
+                }));
+      int changed = 0;
+      for (var f : futures) if (f.get()) changed++;
+      assertEquals(1, changed);
+    }
+    assertEquals(
+        1,
+        db.queryForObject(
+            "SELECT count(*) FROM repair_escalations WHERE repair_id=?", Integer.class, id));
+    assertEquals(
+        "REPORTED",
+        db.queryForObject("SELECT status FROM repair_orders WHERE id=?", String.class, id));
+    assertEquals(0, COMMANDS.get());
+  }
+
+  @Test
+  void m3FailedReminderPersistenceRollsBackAndCanRetry() throws Exception {
+    long id = reportedRepair();
+    db.update(
+        "UPDATE repair_orders SET created_at=CURRENT_TIMESTAMP-INTERVAL '2"
+            + " days',repair_deadline=NULL WHERE id=?",
+        id);
+    db.execute(
+        "CREATE FUNCTION fail_reminder() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE"
+            + " EXCEPTION 'reminder failure'; END $$");
+    db.execute(
+        "CREATE TRIGGER fail_reminder BEFORE INSERT ON repair_escalations FOR EACH ROW EXECUTE"
+            + " FUNCTION fail_reminder()");
+    try {
+      assertThrows(
+          org.springframework.dao.DataAccessException.class, () -> escalation.escalate(id));
+      assertNull(
+          db.queryForObject(
+              "SELECT repair_deadline FROM repair_orders WHERE id=?",
+              java.time.OffsetDateTime.class,
+              id));
+      assertEquals(0, db.queryForObject("SELECT count(*) FROM repair_escalations", Integer.class));
+      assertEquals(
+          "REPORTED",
+          db.queryForObject("SELECT status FROM repair_orders WHERE id=?", String.class, id));
+    } finally {
+      db.execute("DROP TRIGGER fail_reminder ON repair_escalations");
+      db.execute("DROP FUNCTION fail_reminder()");
+    }
+    assertTrue(escalation.escalate(id));
   }
 
   void assignRepair(long id) throws Exception {

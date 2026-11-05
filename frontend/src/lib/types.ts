@@ -43,6 +43,27 @@ export interface Reservation {
   checkedInAt: string | null
   cancelReason: string | null
 }
+export interface Notification {
+  id: number
+  reservationId: number
+  type: 'PRE_START_REMINDER' | 'NO_SHOW_WARNING' | 'CANCELLED_NOTICE'
+  scheduledAt: string
+  status: 'PENDING' | 'SENT' | 'SKIPPED'
+  deliveredAt: string | null
+}
+export interface SeatStatistic {
+  classroomId: number
+  classroomName: string
+  seatCount: number
+  reservedHours: number
+  usedHours: number
+  utilizationRate: number
+  cancelledCount: number
+  noShowCount: number
+  maintenanceHours: number
+  from: string
+  to: string
+}
 export interface Application {
   id: number
   classroomId: number

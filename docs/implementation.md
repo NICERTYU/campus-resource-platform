@@ -48,7 +48,11 @@ Python全量验收通过时启用了 `CAMPUS_BASE_URL`、`CAMPUS_NETWORK_TEST=1`
 
 公开仓库已配置为 [NICERTYU/campus-resource-platform](https://github.com/NICERTYU/campus-resource-platform)，CI及自动部署结果见[GitHub Actions工作流记录](https://github.com/NICERTYU/campus-resource-platform/actions/workflows/ci.yml)。云测试主机、SSH及测试部署配置已接入，一套测试环境已通过公开入口验证，并已切换至受信任的公网IP HTTPS证书。独立域名、生产审批发布、线上回退和目标主机负载容量尚未验证。当前主机仅运行一套测试环境，不能据此认定能够同时承载开发、测试和生产环境。预算也未经过实际负载与租期费用核对。
 
-提醒/通知、运营统计、历史复用、动态权限、多级审批及维修评价等保持为产品文档中的后续阶段，本次未列为已完成功能。
+动态权限、多级审批及维修评价等保持为产品文档中的后续阶段；提醒/通知、运营统计和历史复用已在 M1 后续交付中完成，验收范围见 [M1 后续交付验收](acceptance.md#m1-后续交付验收)。
+
+## 2026-11-01 M1 后续交付
+
+张子杨负责的 M1 后续功能已落地：历史预约复用通过服务端重新执行预约校验，通知事件使用 Flyway V4 表和定时扫描幂等处理，管理员运营统计按教室和时间范围汇总预约、签到、取消、未签到及维修影响。新增资源集成测试覆盖复用权限、通知幂等和管理员权限；前端提供学生通知/再次预约入口及管理员运营统计页。当前工作区因本机 Java/Maven 与 npm 运行时配置损坏未能完成本地全量运行，提交前仍需 CI 在标准 Java 21、Node 24 和 PostgreSQL 环境验证。
 
 ## 2026-10-15公开发布准备
 

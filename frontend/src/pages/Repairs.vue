@@ -7,7 +7,92 @@ import { usePagination } from '../lib/pagination'
 import StatusTag from '../components/StatusTag.vue'
 import { useAuth } from '../stores/auth'
 import { request, write, errorMessage } from '../lib/api'
-import type { Repair, Classroom, User } from '../lib/types'
+import { dateTime } from '../lib/time'
+import type {
+  Repair,
+  RepairHistory,
+  RepairEscalation,
+  RepairReview,
+  Classroom,
+  User,
+} from '../lib/types'
+const reviews = ref<Record<number, RepairReview>>({})
+const reviewRecord = ref<Repair | null>(null)
+const rating = ref<number | undefined>(5)
+const reviewComment = ref('')
+const reviewSaving = ref(false)
+const reviewLoadingId = ref<number | null>(null)
+async function openReview(record: Repair) {
+  if (reviewLoadingId.value !== null) return
+  reviewLoadingId.value = record.id
+  try {
+    const existing = await request<RepairReview | undefined>(`/repair-orders/${record.id}/review`)
+    if (existing) reviews.value[record.id] = existing
+    else if (auth.user?.id === record.reporterId) {
+      reviewRecord.value = record
+      rating.value = 5
+      reviewComment.value = ''
+    } else ElMessage.info('报修人尚未提交评价')
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  } finally {
+    reviewLoadingId.value = null
+  }
+}
+async function submitReview() {
+  if (!reviewRecord.value || reviewSaving.value) return
+  if (
+    !Number.isInteger(rating.value) ||
+    rating.value! < 1 ||
+    rating.value! > 5 ||
+    reviewComment.value.trim().length > 1000
+  ) {
+    ElMessage.warning('评分须为1至5的整数，评价内容最多1000字')
+    return
+  }
+  reviewSaving.value = true
+  try {
+    const record = reviewRecord.value
+    reviews.value[record.id] = await write<RepairReview>(`/repair-orders/${record.id}/review`, {
+      rating: rating.value,
+      comment: reviewComment.value.trim(),
+    })
+    reviewRecord.value = null
+    ElMessage.success('评价已提交')
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  } finally {
+    reviewSaving.value = false
+  }
+}
+const escalations = ref<RepairEscalation[]>([])
+const escalationError = ref('')
+let loadingEscalations = false
+async function loadEscalations() {
+  if (!auth.isAdmin || loadingEscalations) return
+  loadingEscalations = true
+  try {
+    escalations.value = await request<RepairEscalation[]>(
+      '/repair-orders/escalations?page=1&pageSize=10',
+    )
+    escalationError.value = ''
+  } catch (e) {
+    escalationError.value = errorMessage(e)
+  } finally {
+    loadingEscalations = false
+  }
+}
+async function refresh() {
+  await Promise.all([load(), loadEscalations()])
+}
+const histories = ref<Record<number, RepairHistory[]>>({})
+async function showHistory(id: number) {
+  try {
+    histories.value[id] = await request<RepairHistory[]>(`/repair-orders/${id}/history`)
+  } catch (e) {
+    ElMessage.error(errorMessage(e))
+  }
+}
 const auth = useAuth(),
   records = ref<Repair[]>([]),
   rooms = ref<Classroom[]>([]),
@@ -74,6 +159,10 @@ async function execute() {
     ElMessage.warning('请选择维修人员')
     return
   }
+  if (type === 'assign' && action.value.record.status === 'ASSIGNED' && !text.value.trim()) {
+    ElMessage.warning('请填写改派原因')
+    return
+  }
   if (['complete', 'return'].includes(type) && !text.value.trim()) {
     ElMessage.warning(type === 'return' ? '请填写返修原因' : '请填写完工说明')
     return
@@ -82,7 +171,15 @@ async function execute() {
   try {
     const body =
       type === 'assign'
-        ? { technicianId: technicianId.value }
+        ? {
+            technicianId: technicianId.value,
+            ...(action.value.record.status === 'ASSIGNED'
+              ? {
+                  reason: text.value.trim(),
+                  expectedTechnicianId: action.value.record.technicianId,
+                }
+              : {}),
+          }
         : type === 'start'
           ? {}
           : type === 'complete'
@@ -107,6 +204,7 @@ const actionName: Record<string, string> = {
 }
 onMounted(async () => {
   await load()
+  await loadEscalations()
   try {
     rooms.value = await request<Classroom[]>('/classrooms')
     roomId.value = rooms.value[0]?.id
@@ -119,6 +217,7 @@ onMounted(async () => {
   }
   poll = setInterval(() => {
     if (!loading.value && records.value.some((r) => r.status === 'PROCESSING')) void load(true)
+    void loadEscalations()
   }, 5000)
 })
 onUnmounted(() => clearInterval(poll))
@@ -134,7 +233,7 @@ onUnmounted(() => clearInterval(poll))
           ? '查看分派给你的工单，更新维修进度并提交完工。'
           : '遇到空间故障？告诉我们，让问题尽快得到处理。'
     "
-    ><el-button @click="load()" :loading="loading">刷新</el-button
+    ><el-button @click="refresh" :loading="loading">刷新</el-button
     ><el-button type="primary" @click="createOpen = true">＋ 上报故障</el-button></PageHeading
   >
   <div class="info-banner">
@@ -146,6 +245,20 @@ onUnmounted(() => clearInterval(poll))
     </p>
   </div>
   <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
+  <el-alert
+    v-if="escalationError"
+    :title="'超时提醒加载失败：' + escalationError"
+    type="warning"
+    :closable="false"
+  />
+  <section v-if="auth.isAdmin && escalations.length" class="surface" aria-label="工单超时升级提醒">
+    <h3>超时升级提醒</h3>
+    <p class="muted">最近10条管理员站内提醒。</p>
+    <p v-for="event in escalations" :key="event.id">
+      工单 #{{ event.repairId }} 已超处理期限（{{ dateTime(event.deadline) }}），请跟进。
+      <small>升级时间：{{ dateTime(event.escalatedAt) }}</small>
+    </p>
+  </section>
   <section class="surface" v-loading="loading">
     <div class="section-kicker">
       {{ auth.isAdmin ? '报修工单台' : auth.has('TECHNICIAN') ? '我的维修任务' : '我的报修记录' }}
@@ -166,6 +279,7 @@ onUnmounted(() => clearInterval(poll))
       </div>
       <p class="muted" v-if="r.note">完工说明：{{ r.note }}</p>
       <p class="muted" v-if="r.comment">验收意见：{{ r.comment }}</p>
+      <p class="muted" v-if="r.repairDeadline">处理期限：{{ dateTime(r.repairDeadline) }}</p>
       <el-alert
         v-if="r.pendingAction"
         title="正在同步资源状态，请稍后查看。"
@@ -173,6 +287,15 @@ onUnmounted(() => clearInterval(poll))
         :closable="false"
       /><el-alert v-if="r.lastError" :title="r.lastError" type="warning" :closable="false" />
       <div class="workflow-actions">
+        <el-button
+          v-if="r.status === 'ACCEPTED' && (auth.isAdmin || auth.user?.id === r.reporterId)"
+          :loading="reviewLoadingId === r.id"
+          @click="openReview(r)"
+          >{{
+            reviews[r.id] || auth.user?.id !== r.reporterId ? '查看评价' : '维修评价'
+          }}</el-button
+        >
+        <el-button @click="showHistory(r.id)">派单与返修记录</el-button>
         <el-button
           v-if="auth.isAdmin && ['REPORTED', 'ASSIGNED'].includes(r.status)"
           type="primary"
@@ -197,6 +320,18 @@ onUnmounted(() => clearInterval(poll))
           ><el-button @click="openAction(r, 'return')">退回维修</el-button></template
         >
       </div>
+      <p v-if="reviews[r.id]" class="muted" data-testid="repair-review">
+        维修评价：{{ reviews[r.id]!.rating }}/5 · {{ reviews[r.id]!.comment || '无文字评价' }} ·
+        {{ dateTime(reviews[r.id]!.reviewedAt) }}
+      </p>
+      <p v-for="h in histories[r.id]" :key="h.id" class="muted">
+        {{ h.actorName }} ·
+        {{ h.action === 'RETURN' ? '退回维修' : h.action === 'REASSIGN' ? '改派' : '派单' }} ·
+        {{ dateTime(h.createdAt) }}
+        <span v-if="h.previousTechnicianId"> · 原维修人员 #{{ h.previousTechnicianId }}</span>
+        <span v-if="h.technicianId"> · 维修人员 #{{ h.technicianId }}</span>
+        <span v-if="h.reason"> · {{ h.reason }}</span>
+      </p>
     </div>
     <el-empty v-if="!records.length" description="暂无报修工单" :image-size="90" />
     <PagePager
@@ -207,6 +342,47 @@ onUnmounted(() => clearInterval(poll))
       @change="(page) => load(false, page)"
     />
   </section>
+  <el-dialog
+    :model-value="!!reviewRecord"
+    title="维修评价"
+    width="470px"
+    :show-close="!reviewSaving"
+    :close-on-click-modal="!reviewSaving"
+    :close-on-press-escape="!reviewSaving"
+    @close="
+      () => {
+        if (!reviewSaving) reviewRecord = null
+      }
+    "
+  >
+    <p>{{ reviewRecord?.classroomName }} · 工单 #{{ reviewRecord?.id }}</p>
+    <el-form label-position="top">
+      <el-form-item label="评分（1至5分）">
+        <el-input-number
+          v-model="rating"
+          :min="1"
+          :max="5"
+          :step="1"
+          :precision="0"
+          aria-label="维修评分"
+        />
+      </el-form-item>
+      <el-form-item label="评价内容（可选）">
+        <el-input
+          v-model="reviewComment"
+          type="textarea"
+          :rows="3"
+          maxlength="1000"
+          show-word-limit
+          placeholder="评价内容（可选，最多1000字）"
+        />
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button :disabled="reviewSaving" @click="reviewRecord = null">取消</el-button>
+      <el-button type="primary" :loading="reviewSaving" @click="submitReview">提交评价</el-button>
+    </template>
+  </el-dialog>
   <el-dialog v-model="createOpen" title="上报教室故障" width="500px"
     ><el-form label-position="top"
       ><el-form-item label="故障所在教室"
@@ -237,15 +413,22 @@ onUnmounted(() => clearInterval(poll))
     <el-select v-if="action?.type === 'assign'" v-model="technicianId" placeholder="选择维修人员"
       ><el-option v-for="u in technicians" :key="u.id" :value="u.id" :label="u.displayName"
     /></el-select>
+    <el-input
+      v-if="action?.type === 'assign' && action.record.status === 'ASSIGNED'"
+      v-model="text"
+      type="textarea"
+      maxlength="1000"
+      placeholder="填写改派原因"
+    />
     <p v-else-if="action?.type === 'start'" class="muted">
       开始维修后该教室整体暂停预约。已有记录保留，维修期间无法签到。
     </p>
     <el-input
-      v-else
+      v-else-if="action?.type !== 'assign'"
       v-model="text"
       type="textarea"
       :rows="3"
-      maxlength="2000"
+      :maxlength="action?.type === 'complete' ? 2000 : 1000"
       :placeholder="
         action?.type === 'complete'
           ? '填写维修结果和完工说明'

@@ -48,7 +48,18 @@ final class Model {
       String requestId,
       OffsetDateTime createdAt) {}
 
-  record AssignmentInput(Long technicianId) {}
+  record AssignmentInput(Long technicianId, String reason, Long expectedTechnicianId) {}
+
+  record RepairHistory(
+      long id,
+      String action,
+      long actorId,
+      String actorName,
+      Long previousTechnicianId,
+      Long technicianId,
+      String reason,
+      String requestId,
+      OffsetDateTime createdAt) {}
 
   record CompletionInput(String note) {}
 
@@ -84,7 +95,24 @@ final class Model {
       String note,
       String comment,
       String pendingAction,
-      String lastError) {}
+      String lastError,
+      OffsetDateTime createdAt,
+      OffsetDateTime repairDeadline) {}
+
+  record RepairReviewInput(java.math.BigDecimal rating, String comment) {}
+
+  record RepairReview(
+      long repairId, long reviewerId, int rating, String comment, OffsetDateTime reviewedAt) {}
+
+  record RepairEscalation(
+      long id,
+      long repairId,
+      int level,
+      String observedStatus,
+      OffsetDateTime deadline,
+      OffsetDateTime escalatedAt,
+      String requestId,
+      String notificationStatus) {}
 
   record Restriction(
       long version,

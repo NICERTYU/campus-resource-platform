@@ -33,6 +33,7 @@ describe('repair technician discovery', () => {
       roles: ['STUDENT'],
     }))
     vi.mocked(request).mockImplementation(async (path) => {
+      if (path.startsWith('/repair-orders/escalations')) return []
       if (path === '/admin/users') return students
       if (path === '/admin/users?role=TECHNICIAN')
         return [

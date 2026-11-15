@@ -6,11 +6,14 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.fasterxml.jackson.databind.*;
 import java.net.*;
 import java.net.http.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.*;
@@ -177,17 +180,28 @@ class ResourceIntegrationTest {
   }
 
   @Test
-  void localVersionFourUpgradePreservesSavedNotificationsAndAddsSchedulerFields() {
+  void upstreamVersionFourUpgradePreservesExistingDataAndSupportsLocalEvents(
+      @TempDir Path publishedMigrations) throws Exception {
     var item = (Reservation) service.reserve(user("student"), booking(1), null, "upgrade-v4");
-    TIME.set(from().minusMinutes(15).toInstant());
-    service.sweep();
+    // Use a frozen copy of the published V4, not the active V4 under test, to establish history.
+    for (String filename :
+        List.of(
+            "V1__resource_schema.sql",
+            "V2__reservation_lookup_indexes.sql",
+            "V3__case_insensitive_usernames.sql",
+            "V4__m1_follow_up.sql")) {
+      String location = filename.startsWith("V4") ? "/db/upstream-v4/" : "/db/migration/";
+      try (var source = getClass().getResourceAsStream(location + filename)) {
+        assertNotNull(source, filename);
+        Files.copy(source, publishedMigrations.resolve(filename));
+      }
+    }
     var legacy =
         org.flywaydb.core.Flyway.configure()
             .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
             .schemas("resource_upgrade_v4")
             .defaultSchema("resource_upgrade_v4")
-            .locations("classpath:db/migration")
-            .target("4")
+            .locations("filesystem:" + publishedMigrations)
             .load();
     try {
       legacy.migrate();
@@ -195,13 +209,30 @@ class ResourceIntegrationTest {
         db.update("INSERT INTO resource_upgrade_v4." + table + " SELECT * FROM resource." + table);
       db.update(
           "INSERT INTO resource_upgrade_v4.reservation_notifications"
-              + " (id,reservation_id,user_id,type,created_at)"
-              + " SELECT id,reservation_id,user_id,type,created_at FROM reservation_notifications"
-              + " WHERE type='STARTING_SOON'");
-      db.queryForObject(
-          "SELECT setval('resource_upgrade_v4.reservation_notifications_id_seq',"
-              + " (SELECT max(id) FROM resource_upgrade_v4.reservation_notifications))",
-          Long.class);
+              + " (reservation_id,user_id,type,scheduled_at,status,delivered_at,created_at)"
+              + " VALUES(?,?,'PRE_START_REMINDER',?,'SENT',?,?),"
+              + " (?,?,'NO_SHOW_WARNING',?,'PENDING',NULL,?),"
+              + " (?,?,'CANCELLED_NOTICE',?,'SKIPPED',NULL,?)",
+          item.id(),
+          user("student").id(),
+          from().minusMinutes(15),
+          from(),
+          from(),
+          item.id(),
+          user("student").id(),
+          from().plusMinutes(10),
+          from(),
+          item.id(),
+          user("student").id(),
+          from().plusMinutes(15),
+          from());
+      var before =
+          db.queryForList(
+              "SELECT * FROM resource_upgrade_v4.reservation_notifications ORDER BY id");
+      var checksum =
+          db.queryForObject(
+              "SELECT checksum FROM resource_upgrade_v4.flyway_schema_history WHERE version='4'",
+              Integer.class);
       var latest =
           org.flywaydb.core.Flyway.configure()
               .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
@@ -209,26 +240,37 @@ class ResourceIntegrationTest {
               .defaultSchema("resource_upgrade_v4")
               .locations("classpath:db/migration")
               .load();
-      latest.migrate();
+      // migrate validates the published V4 checksum while applying the pending V5.
+      assertEquals(1, latest.migrate().migrationsExecuted);
       latest.validate();
+      assertEquals(
+          checksum,
+          db.queryForObject(
+              "SELECT checksum FROM resource_upgrade_v4.flyway_schema_history WHERE version='4'",
+              Integer.class));
+      assertEquals(
+          before,
+          db.queryForList(
+              "SELECT * FROM resource_upgrade_v4.reservation_notifications ORDER BY id"));
       assertEquals(
           1,
           db.queryForObject(
-              "SELECT count(*) FROM resource_upgrade_v4.reservation_notifications"
-                  + " WHERE reservation_id=? AND type='STARTING_SOON'"
-                  + " AND scheduled_at=created_at AND delivered_at=created_at AND status='SENT'",
+              "SELECT count(*) FROM resource_upgrade_v4.reservations WHERE id=? AND"
+                  + " status='PENDING'",
               Integer.class,
               item.id()));
       db.update(
           "INSERT INTO resource_upgrade_v4.reservation_notifications"
-              + " (reservation_id,user_id,type,scheduled_at,created_at)"
-              + " VALUES(?,?,'PRE_START_REMINDER',now(),now())",
+              + " (reservation_id,user_id,type,created_at)"
+              + " VALUES(?,?,'STARTING_SOON',?)",
           item.id(),
-          user("student").id());
+          user("student").id(),
+          from());
       assertEquals(
-          2,
+          4,
           db.queryForObject(
               "SELECT count(*) FROM resource_upgrade_v4.reservation_notifications", Integer.class));
+      assertEquals(0, latest.migrate().migrationsExecuted);
     } finally {
       db.execute("DROP SCHEMA IF EXISTS resource_upgrade_v4 CASCADE");
     }

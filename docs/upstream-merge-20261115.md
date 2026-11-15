@@ -14,11 +14,13 @@
 
 ## 数据库边界
 
-本地已存在 [V4站内提醒迁移](../backend/resource-app/src/main/resources/db/migration/V4__reservation_notifications.sql)，其内容和校验和保持不变。远端新增的另一份V4无法直接并存，因此本地整合改用 [V5扩展迁移](../backend/resource-app/src/main/resources/db/migration/V5__m1_follow_up.sql)，增加计划时间、处理状态和处理时间，扩展事件类型约束。既有事件、预约和用户记录保留，旧事件的计划及处理时间从原发生时间回填。
+用户随后确认目标数据库已经使用远端V4。本轮据此修正首轮合并方案：运行目录原样恢复 [远端V4迁移](../backend/resource-app/src/main/resources/db/migration/V4__m1_follow_up.sql)，与 `origin/main` 逐字节一致；[V5扩展迁移](../backend/resource-app/src/main/resources/db/migration/V5__m1_follow_up.sql)只扩展通知类型约束并为本地站内事件补上计划时间默认值。既有预约、用户、通知ID、计划时间、处理状态和处理时间均不回写。
 
-该分支适用于空库、V1旧库及本地V4历史。若目标数据库已经执行远端原始 `V4__m1_follow_up.sql`，其迁移历史与本地V4不同，部署前需要另行制定兼容方案；本次未对任何既有业务数据库运行迁移或Flyway repair，也未部署或推送远端。
+原本地V4原文移至[历史资料](migration-history/V4__reservation_notifications.sql)，不会进入运行时迁移目录，原始本地功能继续由远端V4与新增V5支持。首轮合并提交 `c3f5846` 保留在分支 `backup/cyf-before-upstream-v4-20261115`。
 
-## 验证
+当前分支适用于空库、V1旧库和远端V4数据库；首轮保留本地V4历史的方案已被本轮替代。此前V5只在本次创建并清理的独立测试库运行，没有迁移任何现有业务数据库，也没有执行Flyway repair。若另有数据库实际使用归档中的本地V4，则仍需单独制定升级方案，不能直接替换其历史。
+
+## 首轮合并验证（c3f5846）
 
 | 检查 | 本次结果 |
 | --- | --- |
@@ -33,4 +35,12 @@
 
 初轮沙箱运行因禁止本机套接字失败，后改用有本机网络权限的测试环境并让回环地址绕过代理。新增迁移测试最初引用了不存在的public schema，已修正为应用实际resource schema；远端迁移改名后的文档链接也已修正，最终验证结果只记录修正后的结果。
 
-新增回归包括：本地V4已有站内事件升级到V5后保留、两套通知HTTP响应不会混用事件类型且互相隔离账号、缺少复用时段返回400，以及两个通知标签的独立请求和错误清空。
+首轮新增回归包括：当时的本地V4已有站内事件升级到V5后保留、两套通知HTTP响应不会混用事件类型且互相隔离账号、缺少复用时段返回400，以及两个通知标签的独立请求和错误清空。
+
+## 远端V4兼容修正验证
+
+升级测试改为使用[独立冻结的远端V4 SQL夹具](../backend/resource-app/src/test/resources/db/upstream-v4/V4__m1_follow_up.sql)建立真实迁移历史，再切换到当前运行目录验证和升级。验证V4校验和保持不变，V5仅执行一次，已有SENT/PENDING/SKIPPED三种通知记录的所有字段逐项保留，已有预约不变，升级后可写入本地STARTING_SOON事件且重复迁移不产生变动。
+
+本轮执行 `backend/./mvnw -o -B clean verify`，105项后端测试全部通过，0失败、0跳过，包含空库、V1升级、冻结的远端V4升级及两套通知HTTP契约测试。另有8项文档检查与5项仓库范围检查通过。前端页面和接口实现未改动，前端与浏览器结果沿用上一节，未重复记作本轮重新运行。
+
+远端V4、当前运行V4及冻结夹具逐字节一致，SHA-256为 `0a7dbf03fea41189b1cafc8407c4919ef378a98b0a662aaa451eb6c6d5501f8e`。相对 `origin/main` 的运行迁移目录只有新增V5，没有删除或修改已发布迁移。验证使用独立55449实例，测试结束已自动关闭；本轮未触碰业务数据库。

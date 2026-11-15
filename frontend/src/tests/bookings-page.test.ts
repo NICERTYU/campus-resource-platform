@@ -175,4 +175,32 @@ describe('M1 bookings page', () => {
     ).toBeDefined()
     expect(write).not.toHaveBeenCalled()
   })
+  it('keeps upstream notification events separate from saved local reminders', async () => {
+    await render()
+    vi.mocked(request).mockResolvedValue([
+      {
+        id: 2,
+        reservationId: 41,
+        type: 'PRE_START_REMINDER',
+        scheduledAt: record.startTime,
+        status: 'SENT',
+        deliveredAt: record.startTime,
+      },
+    ])
+    await tab('通知事件')
+    expect(request).toHaveBeenLastCalledWith('/notifications/mine?page=1&pageSize=50')
+    expect(wrapper.text()).toContain('开始前提醒')
+    expect(wrapper.text()).toContain('SENT')
+    expect(wrapper.findAll('[data-testid="reservation-notification"]')).toHaveLength(0)
+    vi.mocked(request).mockRejectedValue(
+      new ApiError(503, 'UNAVAILABLE', '事件加载失败', 'events-503'),
+    )
+    await click('刷新记录')
+    expect(wrapper.text()).toContain('事件加载失败（请求编号 events-503）')
+    expect(wrapper.text()).not.toContain('SENT')
+    vi.mocked(request).mockResolvedValue([])
+    await tab('站内提醒')
+    expect(request).toHaveBeenLastCalledWith('/reservations/notifications?page=1&pageSize=50')
+    expect(wrapper.text()).toContain('暂无站内提醒')
+  })
 })

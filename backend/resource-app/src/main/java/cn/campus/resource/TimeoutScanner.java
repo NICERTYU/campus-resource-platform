@@ -17,6 +17,7 @@ class TimeoutScanner {
   @EventListener(ApplicationReadyEvent.class)
   void recovery() {
     service.sweep();
+    service.processNotifications();
   }
 
   @Scheduled(
@@ -24,5 +25,6 @@ class TimeoutScanner {
       initialDelayString = "${campus.timeout-scan-ms:30000}")
   void scan() {
     service.sweep();
+    service.processNotifications();
   }
 }

@@ -7,7 +7,7 @@ import { usePagination } from '../lib/pagination'
 import { request, write, errorMessage } from '../lib/api'
 import { campusDate, dateTime } from '../lib/time'
 import { actionLabel } from '../lib/status'
-import type { Classroom, Seat, Audit } from '../lib/types'
+import type { Classroom, Seat, Audit, SeatStatistic } from '../lib/types'
 const tab = ref('spaces'),
   rooms = ref<Classroom[]>([]),
   seats = ref<Seat[]>([]),
@@ -24,7 +24,11 @@ const tab = ref('spaces'),
   seatDialog = ref(false),
   codeDialog = ref(false),
   dailyCode = ref(''),
-  codeRoomId = ref<number>()
+  codeRoomId = ref<number>(),
+  statistics = ref<SeatStatistic[]>([]),
+  statisticsFrom = ref(campusDate(new Date(Date.now() - 6 * 86400000))),
+  statisticsTo = ref(campusDate()),
+  statisticsLoading = ref(false)
 const blankRoom = () => ({
   id: undefined as number | undefined,
   name: '',
@@ -96,6 +100,19 @@ async function loadSeats() {
     seats.value = await request<Seat[]>(`/admin/classrooms/${roomId.value}/seats`)
   } catch (e) {
     error.value = errorMessage(e)
+  }
+}
+async function loadStatistics() {
+  if (!statisticsFrom.value || !statisticsTo.value) return
+  statisticsLoading.value = true
+  try {
+    statistics.value = await request<SeatStatistic[]>(
+      `/admin/seat-statistics?from=${encodeURIComponent(`${statisticsFrom.value}T00:00:00+08:00`)}&to=${encodeURIComponent(`${statisticsTo.value}T23:59:59+08:00`)}`,
+    )
+  } catch (e) {
+    error.value = errorMessage(e)
+  } finally {
+    statisticsLoading.value = false
   }
 }
 function editRoom(room?: Classroom) {
@@ -212,11 +229,54 @@ onMounted(load)
   <section class="surface" v-loading="loading">
     <el-tabs v-model="tab"
       ><el-tab-pane label="教室与座位" name="spaces" /><el-tab-pane
-        label="预约参数"
-        name="settings" /><el-tab-pane label="每日签到码" name="codes" /><el-tab-pane
-        label="操作日志"
-        name="audit" /></el-tabs
-    ><template v-if="tab === 'spaces'"
+        label="运营统计"
+        name="statistics" /><el-tab-pane label="预约参数" name="settings" /><el-tab-pane
+        label="每日签到码"
+        name="codes" /><el-tab-pane label="操作日志" name="audit" /></el-tabs
+    ><template v-if="tab === 'statistics'">
+      <div class="table-toolbar">
+        <div>
+          <h3>座位使用统计</h3>
+          <p class="muted">按教室汇总预约、签到、取消、未签到和维修影响时长。</p>
+        </div>
+        <el-button type="primary" :loading="statisticsLoading" @click="loadStatistics"
+          >查询统计</el-button
+        >
+      </div>
+      <div class="inline-fields">
+        <el-date-picker
+          v-model="statisticsFrom"
+          type="date"
+          value-format="YYYY-MM-DD"
+          format="YYYY-MM-DD"
+        /><span>至</span
+        ><el-date-picker
+          v-model="statisticsTo"
+          type="date"
+          value-format="YYYY-MM-DD"
+          format="YYYY-MM-DD"
+        />
+      </div>
+      <el-table :data="statistics" v-loading="statisticsLoading" empty-text="请选择时间范围并查询">
+        <el-table-column prop="classroomName" label="教室" min-width="130" /><el-table-column
+          prop="seatCount"
+          label="座位数"
+          width="85"
+        /><el-table-column label="使用率" width="100"
+          ><template #default="{ row }">{{
+            `${(row.utilizationRate * 100).toFixed(1)}%`
+          }}</template></el-table-column
+        ><el-table-column prop="reservedHours" label="预约小时" width="100" /><el-table-column
+          prop="usedHours"
+          label="签到小时"
+          width="100"
+        /><el-table-column prop="cancelledCount" label="取消" width="70" /><el-table-column
+          prop="noShowCount"
+          label="未签到"
+          width="80"
+        /><el-table-column prop="maintenanceHours" label="维修影响小时" width="120" />
+      </el-table> </template
+    ><template v-else-if="tab === 'spaces'"
       ><div class="table-toolbar">
         <h3>教室目录</h3>
         <el-button type="primary" @click="editRoom()">＋ 新增教室</el-button>

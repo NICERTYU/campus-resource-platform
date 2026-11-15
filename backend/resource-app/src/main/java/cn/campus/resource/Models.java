@@ -50,6 +50,14 @@ final class Models {
 
   record ReuseRequest(OffsetDateTime startTime, OffsetDateTime endTime) {}
 
+  record Notification(
+      long id,
+      long reservationId,
+      String type,
+      OffsetDateTime scheduledAt,
+      String status,
+      OffsetDateTime deliveredAt) {}
+
   record ClassroomInput(
       String name,
       String building,

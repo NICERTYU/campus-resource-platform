@@ -55,18 +55,18 @@ class ResourceController {
     return service.reserve(actor(auth), body, key(request), RequestIds.of(request));
   }
 
-  @PostMapping("/reservations/{id}/cancel")
-  Object cancel(Authentication auth, @PathVariable long id, HttpServletRequest request) {
-    return service.cancel(actor(auth), id, key(request), RequestIds.of(request));
-  }
-
   @PostMapping("/reservations/{id}/reuse")
   Object reuse(
       Authentication auth,
       @PathVariable long id,
-      @RequestBody ReuseRequest body,
+      @RequestBody(required = false) ReuseRequest body,
       HttpServletRequest request) {
     return service.reuse(actor(auth), id, body, key(request), RequestIds.of(request));
+  }
+
+  @PostMapping("/reservations/{id}/cancel")
+  Object cancel(Authentication auth, @PathVariable long id, HttpServletRequest request) {
+    return service.cancel(actor(auth), id, key(request), RequestIds.of(request));
   }
 
   @GetMapping("/reservations/notifications")
@@ -94,6 +94,14 @@ class ResourceController {
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "50") int pageSize) {
     return service.violations(actor(auth), page, pageSize);
+  }
+
+  @GetMapping("/notifications/mine")
+  Object scheduledNotifications(
+      Authentication auth,
+      @RequestParam(defaultValue = "1") int page,
+      @RequestParam(defaultValue = "50") int pageSize) {
+    return service.scheduledNotifications(actor(auth), page, pageSize);
   }
 
   @GetMapping("/admin/users")
@@ -179,5 +187,14 @@ class ResourceController {
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "50") int pageSize) {
     return service.logs(actor(auth), page, pageSize);
+  }
+
+  @GetMapping("/admin/seat-statistics")
+  Object statistics(
+      Authentication auth,
+      @RequestParam(required = false) Long classroomId,
+      @RequestParam OffsetDateTime from,
+      @RequestParam OffsetDateTime to) {
+    return service.statistics(actor(auth), classroomId, from, to);
   }
 }

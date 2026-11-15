@@ -115,7 +115,7 @@ class ResourceIntegrationTest {
     assertEquals(6, db.queryForObject("SELECT count(*) FROM users", Integer.class));
     assertEquals(72, db.queryForObject("SELECT count(*) FROM seats", Integer.class));
     assertEquals(
-        4,
+        5,
         db.queryForObject(
             "SELECT count(*) FROM flyway_schema_history WHERE success AND version IS NOT NULL",
             Integer.class));
@@ -153,7 +153,7 @@ class ResourceIntegrationTest {
               "SELECT display_name FROM resource_upgrade.users WHERE username='retained'",
               String.class));
       assertEquals(
-          4,
+          5,
           db.queryForObject(
               "SELECT count(*) FROM resource_upgrade.flyway_schema_history WHERE success AND"
                   + " version IS NOT NULL",
@@ -174,6 +174,102 @@ class ResourceIntegrationTest {
     } finally {
       db.execute("DROP SCHEMA IF EXISTS resource_upgrade CASCADE");
     }
+  }
+
+  @Test
+  void localVersionFourUpgradePreservesSavedNotificationsAndAddsSchedulerFields() {
+    var item = (Reservation) service.reserve(user("student"), booking(1), null, "upgrade-v4");
+    TIME.set(from().minusMinutes(15).toInstant());
+    service.sweep();
+    var legacy =
+        org.flywaydb.core.Flyway.configure()
+            .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
+            .schemas("resource_upgrade_v4")
+            .defaultSchema("resource_upgrade_v4")
+            .locations("classpath:db/migration")
+            .target("4")
+            .load();
+    try {
+      legacy.migrate();
+      for (String table : List.of("users", "classrooms", "seats", "reservations"))
+        db.update("INSERT INTO resource_upgrade_v4." + table + " SELECT * FROM resource." + table);
+      db.update(
+          "INSERT INTO resource_upgrade_v4.reservation_notifications"
+              + " (id,reservation_id,user_id,type,created_at)"
+              + " SELECT id,reservation_id,user_id,type,created_at FROM reservation_notifications"
+              + " WHERE type='STARTING_SOON'");
+      db.queryForObject(
+          "SELECT setval('resource_upgrade_v4.reservation_notifications_id_seq',"
+              + " (SELECT max(id) FROM resource_upgrade_v4.reservation_notifications))",
+          Long.class);
+      var latest =
+          org.flywaydb.core.Flyway.configure()
+              .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
+              .schemas("resource_upgrade_v4")
+              .defaultSchema("resource_upgrade_v4")
+              .locations("classpath:db/migration")
+              .load();
+      latest.migrate();
+      latest.validate();
+      assertEquals(
+          1,
+          db.queryForObject(
+              "SELECT count(*) FROM resource_upgrade_v4.reservation_notifications"
+                  + " WHERE reservation_id=? AND type='STARTING_SOON'"
+                  + " AND scheduled_at=created_at AND delivered_at=created_at AND status='SENT'",
+              Integer.class,
+              item.id()));
+      db.update(
+          "INSERT INTO resource_upgrade_v4.reservation_notifications"
+              + " (reservation_id,user_id,type,scheduled_at,created_at)"
+              + " VALUES(?,?,'PRE_START_REMINDER',now(),now())",
+          item.id(),
+          user("student").id());
+      assertEquals(
+          2,
+          db.queryForObject(
+              "SELECT count(*) FROM resource_upgrade_v4.reservation_notifications", Integer.class));
+    } finally {
+      db.execute("DROP SCHEMA IF EXISTS resource_upgrade_v4 CASCADE");
+    }
+  }
+
+  @Test
+  void bothNotificationHttpContractsRemainScopedAndDoNotMixEventTypes() throws Exception {
+    var item = (Reservation) service.reserve(user("student"), booking(1), null, "merged-notify");
+    TIME.set(from().minusMinutes(15).toInstant());
+    service.sweep();
+    service.processNotifications();
+    service.processNotifications();
+    var student = login("student");
+    var local = send(student, "GET", "/api/v1/reservations/notifications", null, null);
+    assertEquals(200, local.statusCode(), local.body());
+    var saved = json.readTree(local.body());
+    assertEquals(1, saved.size());
+    assertEquals("STARTING_SOON", saved.get(0).get("type").asText());
+    assertEquals("AVAILABLE", saved.get(0).get("notificationStatus").asText());
+    var upstream = send(student, "GET", "/api/v1/notifications/mine", null, null);
+    assertEquals(200, upstream.statusCode(), upstream.body());
+    var planned = json.readTree(upstream.body());
+    assertEquals(2, planned.size());
+    assertTrue(planned.findValuesAsText("type").contains("PRE_START_REMINDER"));
+    assertFalse(planned.findValuesAsText("type").contains("STARTING_SOON"));
+    var other = login("student2");
+    for (String path :
+        List.of("/api/v1/reservations/notifications", "/api/v1/notifications/mine")) {
+      var response = send(other, "GET", path, null, null);
+      assertEquals(200, response.statusCode());
+      assertTrue(json.readTree(response.body()).isEmpty());
+      assertEquals(401, send(HttpClient.newHttpClient(), "GET", path, null, null).statusCode());
+    }
+    String csrf =
+        json.readTree(send(student, "GET", "/api/v1/auth/csrf", null, null).body())
+            .get("token")
+            .asText();
+    assertEquals(
+        400,
+        send(student, "POST", "/api/v1/reservations/" + item.id() + "/reuse", "{}", csrf)
+            .statusCode());
   }
 
   @Test
@@ -268,6 +364,66 @@ class ResourceIntegrationTest {
     assertEquals(0, db.queryForObject("SELECT count(*) FROM seat_slots", Integer.class));
     assertThrows(
         ApiError.class, () -> service.checkIn(user("student"), item.id(), "246810", null, "r3"));
+  }
+
+  @Test
+  void historicalReservationCanBeReusedOnlyByOwnerAndSchedulesNotifications() {
+    Reservation item =
+        (Reservation) service.reserve(user("student"), booking(1), null, "reuse-source");
+    TIME.set(from().plusMinutes(15).toInstant());
+    service.sweep();
+    Reservation reused =
+        (Reservation)
+            service.reuse(
+                user("student"),
+                item.id(),
+                new ReuseRequest(from().plusDays(1), from().plusDays(1).plusHours(2)),
+                "reuse-new",
+                "reuse-request");
+    assertEquals("PENDING", reused.status());
+    assertEquals(
+        2,
+        db.queryForObject(
+            "SELECT count(*) FROM reservation_notifications WHERE reservation_id=?",
+            Integer.class,
+            reused.id()));
+    assertThrows(
+        ApiError.class,
+        () ->
+            service.reuse(
+                user("student2"),
+                item.id(),
+                new ReuseRequest(from().plusDays(1), from().plusDays(1).plusHours(1)),
+                null,
+                "wrong-owner"));
+  }
+
+  @Test
+  void notificationProcessingIsIdempotentAndStatisticsAreAdminOnly() {
+    Reservation item = (Reservation) service.reserve(user("student"), booking(1), null, "notify");
+    TIME.set(from().minusMinutes(15).toInstant());
+    service.processNotifications();
+    service.processNotifications();
+    assertEquals(
+        1,
+        db.queryForObject(
+            "SELECT count(*) FROM reservation_notifications WHERE reservation_id=? AND"
+                + " type='PRE_START_REMINDER'",
+            Integer.class,
+            item.id()));
+    assertEquals(
+        "SENT",
+        db.queryForObject(
+            "SELECT status FROM reservation_notifications WHERE reservation_id=? AND"
+                + " type='PRE_START_REMINDER'",
+            String.class,
+            item.id()));
+    var statistics = service.statistics(user("admin"), null, from(), from().plusDays(1));
+    assertEquals(3, statistics.size());
+    assertEquals(24, ((Number) statistics.getFirst().get("seatCount")).intValue());
+    assertThrows(
+        ApiError.class,
+        () -> service.statistics(user("student"), null, from(), from().plusDays(1)));
   }
 
   @Test

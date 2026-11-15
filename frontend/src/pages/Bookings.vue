@@ -10,11 +10,12 @@ import { interval, dateTime, isoHour } from '../lib/time'
 import { checkInState, reuseDefaults, reuseValidation, notificationLabel } from '../lib/bookings'
 import { reasonLabel } from '../lib/status'
 import { useAuth } from '../stores/auth'
-import type { Reservation, Violation, ReservationNotification } from '../lib/types'
+import type { Reservation, Violation, ReservationNotification, Notification } from '../lib/types'
 const auth = useAuth()
 const records = ref<Reservation[]>([]),
   violations = ref<Violation[]>([]),
   notifications = ref<ReservationNotification[]>([]),
+  scheduledNotifications = ref<Notification[]>([]),
   loading = ref(false),
   saving = ref(false),
   error = ref(''),
@@ -47,6 +48,12 @@ async function load(target = pager.page) {
         violations.value = result
         pager.accept(target, result.length)
       }
+    } else if (view === 'scheduledNotifications') {
+      const result = await request<Notification[]>(`/notifications/mine?${pager.query(target)}`)
+      if (generation === loadGeneration) {
+        scheduledNotifications.value = result
+        pager.accept(target, result.length)
+      }
     } else if (view === 'notifications') {
       const result = await request<ReservationNotification[]>(
         `/reservations/notifications?${pager.query(target)}`,
@@ -69,6 +76,7 @@ async function load(target = pager.page) {
       records.value = []
       violations.value = []
       notifications.value = []
+      scheduledNotifications.value = []
       pager.rowCount = 0
       error.value = errorMessage(e)
     }
@@ -81,6 +89,7 @@ watch(tab, () => {
   records.value = []
   violations.value = []
   notifications.value = []
+  scheduledNotifications.value = []
   void load(1)
 })
 async function cancel(r: Reservation) {
@@ -185,7 +194,9 @@ onUnmounted(() => {
             ? violations.length
             : tab === 'notifications'
               ? notifications.length
-              : records.length
+              : tab === 'scheduledNotifications'
+                ? scheduledNotifications.length
+                : records.length
         }}<small>
           条本页{{
             tab === 'current'
@@ -194,7 +205,9 @@ onUnmounted(() => {
                 ? '历史预约'
                 : tab === 'notifications'
                   ? '站内提醒'
-                  : '违约记录'
+                  : tab === 'scheduledNotifications'
+                    ? '通知事件'
+                    : '违约记录'
           }}</small
         ></strong
       >
@@ -212,7 +225,7 @@ onUnmounted(() => {
         label="历史记录"
         name="history" /><el-tab-pane label="站内提醒" name="notifications" /><el-tab-pane
         label="违约记录"
-        name="violations"
+        name="violations" /><el-tab-pane label="通知事件" name="scheduledNotifications"
     /></el-tabs>
     <template v-if="['current', 'history'].includes(tab)">
       <div
@@ -296,6 +309,30 @@ onUnmounted(() => {
         description="暂无站内提醒"
         :image-size="90"
       />
+    </template>
+    <template v-else-if="tab === 'scheduledNotifications'">
+      <p class="muted">通知事件的处理状态不代表短信、邮件或微信已送达。</p>
+      <el-table :data="scheduledNotifications" empty-text="暂无通知事件">
+        <el-table-column prop="reservationId" label="预约编号" width="100" />
+        <el-table-column label="类型"
+          ><template #default="{ row }">{{
+            row.type === 'PRE_START_REMINDER'
+              ? '开始前提醒'
+              : row.type === 'NO_SHOW_WARNING'
+                ? '未签到提醒'
+                : '取消通知'
+          }}</template></el-table-column
+        >
+        <el-table-column prop="status" label="状态" />
+        <el-table-column label="计划时间"
+          ><template #default="{ row }">{{ dateTime(row.scheduledAt) }}</template></el-table-column
+        >
+        <el-table-column label="处理时间"
+          ><template #default="{ row }">{{
+            row.deliveredAt ? dateTime(row.deliveredAt) : '待处理'
+          }}</template></el-table-column
+        >
+      </el-table>
     </template>
     <template v-else>
       <el-alert

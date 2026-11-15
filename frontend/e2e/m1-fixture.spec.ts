@@ -63,6 +63,17 @@ async function fixture(page: Page, user = student) {
                 checkedInAt: null,
               }),
             ]
+    else if (path === '/notifications/mine')
+      body = [
+        {
+          id: 101,
+          reservationId: 41,
+          type: 'PRE_START_REMINDER',
+          scheduledAt: '2030-11-06T09:45:00+08:00',
+          status: 'SENT',
+          deliveredAt: '2030-11-06T09:50:00+08:00',
+        },
+      ]
     else if (path === '/reservations/notifications')
       body = ['STARTING_SOON', 'CHECK_IN_REMINDER', 'NO_SHOW_CANCELLED'].map((type, i) => ({
         id: i + 1,
@@ -134,6 +145,18 @@ async function fits(page: Page) {
     true,
   )
 }
+test('@fixture 合并后计划通知与原有站内提醒分别展示', async ({ page }) => {
+  await fixture(page)
+  await page.goto('/bookings')
+  await page.getByRole('tab', { name: '通知事件', exact: true }).click()
+  await expect(page.getByRole('cell', { name: '开始前提醒', exact: true })).toBeVisible()
+  await expect(page.getByRole('cell', { name: 'SENT', exact: true })).toBeVisible()
+  await page.getByRole('tab', { name: '站内提醒', exact: true }).click()
+  await expect(page.getByTestId('reservation-notification')).toHaveCount(3)
+  await expect(page.getByRole('cell', { name: 'SENT', exact: true })).toHaveCount(0)
+  await page.setViewportSize({ width: 380, height: 844 })
+  await fits(page)
+})
 test('@fixture M1 复用的过期、无权限和冲突保留确认框及真实编号', async ({ page }) => {
   const state = await fixture(page)
   await page.goto('/bookings')

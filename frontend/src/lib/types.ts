@@ -43,6 +43,32 @@ export interface Reservation {
   checkedInAt: string | null
   cancelReason: string | null
 }
+export interface ReservationNotification {
+  id: number
+  reservationId: number
+  classroomName: string
+  seatLabel: string
+  type: 'STARTING_SOON' | 'CHECK_IN_REMINDER' | 'NO_SHOW_CANCELLED'
+  createdAt: string
+  notificationStatus: 'AVAILABLE'
+}
+export interface ReservationStatisticsRow {
+  classroomId: number
+  classroomName: string
+  reservationCount: number
+  cancelledCount: number
+  noShowCount: number
+  maintenanceCancelledCount: number
+  bookedSeatHours: number
+  capacitySeatHours: number
+  maintenanceSeatHours: number
+  utilization: number | null
+}
+export interface ReservationStatistics {
+  startDate: string
+  endDate: string
+  rows: ReservationStatisticsRow[]
+}
 export interface Application {
   id: number
   classroomId: number

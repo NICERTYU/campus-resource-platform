@@ -31,7 +31,7 @@ import tools.jackson.databind.ObjectMapper;
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class MultilevelApprovalIntegrationTest {
-  @Container static final PostgreSQLContainer DB = new PostgreSQLContainer("postgres:18.6");
+  @Container static final PostgreSQLContainer DB = new TestPostgres();
   static final ObjectMapper JSON = new ObjectMapper();
   static final AtomicReference<Instant> NOW = new AtomicReference<>(Instant.now());
   static final AtomicInteger REMOTE = new AtomicInteger(200);

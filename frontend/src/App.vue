@@ -20,6 +20,7 @@ const navigation = computed(() => [
   ...(auth.isAdmin
     ? [
         { path: '/admin', label: '空间与运营', icon: '⚙', detail: '基础数据与操作记录' },
+        { path: '/admin/statistics', label: '预约统计', icon: '▥', detail: '教室使用与维修影响' },
         { path: '/admin/accounts', label: '账号管理', icon: '♙', detail: '维护账号与访问权限' },
       ]
     : []),

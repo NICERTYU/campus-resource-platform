@@ -48,6 +48,8 @@ final class Models {
 
   record ReserveRequest(long seatId, OffsetDateTime startTime, OffsetDateTime endTime) {}
 
+  record ReuseRequest(OffsetDateTime startTime, OffsetDateTime endTime) {}
+
   record ClassroomInput(
       String name,
       String building,

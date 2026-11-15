@@ -27,6 +27,14 @@
 - 不能停用自己的账号或移除自己的ADMIN角色，必须保留至少一个启用的管理员。修改角色、院系、启停状态或密码后使目标账号已有登录失效；只改姓名保留会话。重新登录后使用新权限，重放同一幂等请求不会再次注销新会话。
 - 派单使用 `GET /admin/users?role=TECHNICIAN`，只返回启用的维修人员；按角色筛选不受其他学生账号数量影响。原无role接口仍为兼容的人员选择列表，新账号管理必须使用分页的 `/admin/accounts`。
 
+## M1 页面联调补充（CYF）
+
+以下为程一帆页面所需的最小资源应用支持，新增接口，不改变原预约接口。详细验收、统计口径与人工待办见 [M1 交付](m1-cyf-delivery.md)。
+
+- `POST /reservations/{id}/reuse` `{startTime,endTime}` → 新预约。示例：`{"startTime":"2026-11-06T10:00:00+08:00","endTime":"2026-11-06T11:00:00+08:00"}`。仅STUDENT复用本人终态记录（CANCELLED/NO_SHOW/COMPLETED），原记录不改；服务端从原记录取seatId，忽略客户端自报归属，复用原预约的完整校验、锁与幂等机制。旧日期必须重新选择；过去/非整点/超30天/超时长400，无权限403，当前记录/停用/占用409，不存在404。失败保留确认框与真实请求编号，禁止自动改时间或重放。
+- `GET /reservations/notifications?page=1&pageSize=50` → 本人站内事件数组，倒序分页。`{id,reservationId,classroomName,seatLabel,type,createdAt,notificationStatus}`，type为STARTING_SOON（开始前15分钟内）、CHECK_IN_REMINDER（开始后10分钟至15分钟内）、NO_SHOW_CANCELLED（实际未签到取消）。示例：`{"id":1,"reservationId":10,"classroomName":"知行101","seatLabel":"A01","type":"STARTING_SOON","createdAt":"2026-11-06T09:45:00+08:00","notificationStatus":"AVAILABLE"}`。V4持久化事件，每预约每类型最多一次，重复扫描不重复插入；不补发已错过窗口的提醒。AVAILABLE只表示站内可查询，不代表邮件/微信/短信或浏览器推送已送达。页面时钟只显示签到窗口提示，不自行取消预约或伪造通知；到期等待服务端刷新确认。
+- `GET /admin/reservation-statistics?startDate=2026-11-01&endDate=2026-11-07&classroomId=1` → `{startDate,endDate,rows:[{classroomId,classroomName,reservationCount,cancelledCount,noShowCount,maintenanceCancelledCount,bookedSeatHours,capacitySeatHours,maintenanceSeatHours,utilization}]}`。仅ADMIN；classroomId可省略，日期为上海自然日、含首尾，最多31天。计数按预约开始日归属，小时按查询窗口与每日开放区间裁剪。bookedSeatHours仅计有效PENDING（尚未过签到截止）、CHECKED_IN、COMPLETED；utilization=bookedSeatHours/capacitySeatHours，为预约占用率，不等于实际到场率。capacity按当前启用教室/座位及开放时间，不追溯历史配置；维修小时对M3来源区间取并集，已解除取releasedAt，仍生效只统计至服务端当前时间，不预测未来维修。无容量时utilization为null。返回聚合数据，不包含学生身份。筛选失败清空旧结果，不用本页预约条数充当全量统计。
+
 ## 流程应用（8082）
 
 M2 新申请使用两级审批及版本校验，完整状态矩阵、请求示例、配置和超时补偿见 [M2 多级审批](m2-approval.md)。原单级历史记录继续按原流程处理。

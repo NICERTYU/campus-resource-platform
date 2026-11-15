@@ -454,6 +454,27 @@ class ResourceService {
         });
   }
 
+  Object reuse(User actor, long id, ReuseRequest input, String key, String requestId) {
+    require(actor, "STUDENT");
+    return mutate(
+        actor,
+        "reservation.reuse:" + id,
+        key,
+        input,
+        () -> {
+          Reservation source = reservation(id);
+          own(actor, id);
+          if (!List.of("CANCELLED", "NO_SHOW", "COMPLETED").contains(source.status()))
+            throw ApiError.conflict("只能复用已结束或已取消的本人历史预约");
+          // REQUIRED transaction propagation keeps the original reservation locks and validation.
+          return reserve(
+              actor,
+              new ReserveRequest(source.seatId(), input.startTime(), input.endTime()),
+              null,
+              requestId);
+        });
+  }
+
   Object cancel(User actor, long id, String key, String requestId) {
     return mutate(
         actor,
@@ -568,6 +589,57 @@ class ResourceService {
                 e);
       }
     }
+    remind("STARTING_SOON");
+    remind("CHECK_IN_REMINDER");
+  }
+
+  private void remind(String type) {
+    // A single INSERT/SELECT records only a currently pending reservation in its live window.
+    Instant instant = now();
+    Instant earliest =
+        type.equals("STARTING_SOON") ? instant : instant.minus(Duration.ofMinutes(15));
+    Instant latest =
+        type.equals("STARTING_SOON")
+            ? instant.plus(Duration.ofMinutes(15))
+            : instant.minus(Duration.ofMinutes(10));
+    db.update(
+        "INSERT INTO reservation_notifications(reservation_id,user_id,type,created_at)"
+            + " SELECT id,user_id,?,? FROM reservations WHERE status='PENDING'"
+            + " AND start_time>=? AND start_time<=? AND check_in_deadline>?"
+            + " ON CONFLICT(reservation_id,type) DO NOTHING",
+        type,
+        stamp(instant),
+        stamp(earliest),
+        stamp(latest),
+        stamp(instant));
+  }
+
+  List<Map<String, Object>> notifications(User actor, int page, int pageSize) {
+    long offset = pageOffset(page, pageSize);
+    return db.query(
+        "SELECT n.*,s.label,c.name FROM reservation_notifications n"
+            + " JOIN reservations r ON r.id=n.reservation_id JOIN seats s ON s.id=r.seat_id"
+            + " JOIN classrooms c ON c.id=s.classroom_id WHERE n.user_id=?"
+            + " ORDER BY n.created_at DESC,n.id DESC LIMIT ? OFFSET ?",
+        (rs, n) ->
+            Map.of(
+                "id",
+                rs.getLong("id"),
+                "reservationId",
+                rs.getLong("reservation_id"),
+                "classroomName",
+                rs.getString("name"),
+                "seatLabel",
+                rs.getString("label"),
+                "type",
+                rs.getString("type"),
+                "createdAt",
+                offset(rs, "created_at"),
+                "notificationStatus",
+                "AVAILABLE"),
+        actor.id(),
+        pageSize,
+        offset);
   }
 
   private void sweepLocked(long room, String requestId) {
@@ -614,6 +686,13 @@ class ResourceService {
           "INSERT INTO violations(user_id,reservation_id,reason,created_at) SELECT"
               + " user_id,id,'NO_SHOW',? FROM reservations WHERE id=? ON"
               + " CONFLICT(reservation_id,reason) DO NOTHING",
+          stamp(now()),
+          reservation.id());
+    if (!maintenance)
+      db.update(
+          "INSERT INTO reservation_notifications(reservation_id,user_id,type,created_at)"
+              + " SELECT id,user_id,'NO_SHOW_CANCELLED',? FROM reservations WHERE id=?"
+              + " ON CONFLICT(reservation_id,type) DO NOTHING",
           stamp(now()),
           reservation.id());
     audit(

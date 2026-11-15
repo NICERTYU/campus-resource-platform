@@ -60,6 +60,23 @@ class ResourceController {
     return service.cancel(actor(auth), id, key(request), RequestIds.of(request));
   }
 
+  @PostMapping("/reservations/{id}/reuse")
+  Object reuse(
+      Authentication auth,
+      @PathVariable long id,
+      @RequestBody ReuseRequest body,
+      HttpServletRequest request) {
+    return service.reuse(actor(auth), id, body, key(request), RequestIds.of(request));
+  }
+
+  @GetMapping("/reservations/notifications")
+  Object notifications(
+      Authentication auth,
+      @RequestParam(defaultValue = "1") int page,
+      @RequestParam(defaultValue = "50") int pageSize) {
+    return service.notifications(actor(auth), page, pageSize);
+  }
+
   record Code(String code) {}
 
   @PostMapping("/reservations/{id}/check-in")

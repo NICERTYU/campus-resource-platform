@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
 import type { Reservation, User } from '../src/lib/types'
+import { expectFitsViewport as fits } from './support/layout'
 const student: User = {
   id: 1,
   username: 'student',
@@ -140,11 +141,6 @@ async function fixture(page: Page, user = student) {
     },
   }
 }
-async function fits(page: Page) {
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(
-    true,
-  )
-}
 test('@fixture 合并后计划通知与原有站内提醒分别展示', async ({ page }) => {
   await fixture(page)
   await page.goto('/bookings')
@@ -203,6 +199,7 @@ test('@fixture M1 管理员筛选统计、服务错误及桌面窄屏布局', as
   await page.getByLabel('统计结束日期', { exact: true }).fill('2030-11-03')
   await page.locator('.m1-statistics-filters .el-select').click()
   await page.getByRole('option', { name: '知行楼101', exact: true }).click()
+  await expect(page.getByRole('listbox', { name: '统计教室', exact: true })).toBeHidden()
   await page.getByRole('button', { name: '查询统计' }).click()
   await expect(page.locator('.m1-statistics-range')).toContainText('2030-11-01 至 2030-11-03')
   expect(state.queries.at(-1)).toContain('classroomId=1')
@@ -214,3 +211,21 @@ test('@fixture M1 管理员筛选统计、服务错误及桌面窄屏布局', as
   await expect(page.getByRole('alert')).toContainText('fixture-stats-503')
   await expect(page.getByTestId('statistics-summary')).toHaveCount(0)
 })
+
+for (const width of [320, 380]) {
+  test(`@fixture M1 统计页以${width}px手机宽度打开且筛选控件完整可见`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 })
+    await fixture(page, { ...student, roles: ['ADMIN'] })
+    await page.goto('/admin/statistics')
+    await expect(page.getByTestId('statistics-summary')).toContainText('20.0%')
+    await fits(page)
+    for (const control of [
+      page.locator('.m1-statistics-filters .el-select'),
+      page.getByLabel('统计开始日期', { exact: true }),
+      page.getByLabel('统计结束日期', { exact: true }),
+      page.getByRole('button', { name: '查询统计', exact: true }),
+    ]) {
+      await expect(control).toBeInViewport({ ratio: 1 })
+    }
+  })
+}

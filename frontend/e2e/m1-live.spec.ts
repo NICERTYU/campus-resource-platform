@@ -1,6 +1,7 @@
 import { expect, test, type APIRequestContext, type APIResponse } from '@playwright/test'
 import { campusDate } from '../src/lib/time'
 import type { Classroom, Reservation, Seat } from '../src/lib/types'
+import { expectFitsViewport } from './support/layout'
 // Real browser, Cookie/CSRF and HTTP. No route interception; test accounts contain no real identities.
 test.use({ trace: 'off' })
 const fixturePassword = 'M1-acceptance-2026!'
@@ -165,6 +166,7 @@ test('M1-CYF 真实浏览器预约、签到、取消、历史复用及服务端�
       .fill(campusDate(new Date(Date.parse(fixed) + 86400000)))
     await page.locator('.m1-statistics-filters .el-select').click()
     await page.getByRole('option', { name: room.name, exact: true }).click()
+    await expect(page.getByRole('listbox', { name: '统计教室', exact: true })).toBeHidden()
     await page.getByRole('button', { name: '查询统计' }).click()
     await expect(page.getByTestId('statistics-room')).toHaveCount(1)
     await expect(page.getByTestId('statistics-summary')).toContainText('预约数量2')
@@ -174,9 +176,7 @@ test('M1-CYF 真实浏览器预约、签到、取消、历史复用及服务端�
         fullPage: true,
       })
     await page.setViewportSize({ width: 380, height: 844 })
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(
-      true,
-    )
+    await expectFitsViewport(page)
   } finally {
     for (const account of accounts) {
       expect(

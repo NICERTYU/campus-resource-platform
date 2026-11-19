@@ -17,10 +17,12 @@
 | 需求 | 实现位置 | 已有验证与当前结论 |
 | --- | --- | --- |
 | M1-F01 历史复用 | [ResourceController.java](../backend/resource-app/src/main/java/cn/campus/resource/ResourceController.java)的reuse入口；[ResourceService.java](../backend/resource-app/src/main/java/cn/campus/resource/ResourceService.java)的reuse调用既有reserve；[Models.java](../backend/resource-app/src/main/java/cn/campus/resource/Models.java)的ReuseRequest；Bookings.vue | [ResourceIntegrationTest.java](../backend/resource-app/src/test/java/cn/campus/resource/ResourceIntegrationTest.java)中的historicalReservationCanBeReusedOnlyByOwnerAndSchedulesNotifications覆盖本人复用、事件创建和非本人拒绝；新增路径的冲突、边界及专门浏览器验收尚不完整 |
-| M1-F02 提醒通知 | ResourceService的scheduleNotifications/processNotifications及取消通知插入；[TimeoutScanner.java](../backend/resource-app/src/main/java/cn/campus/resource/TimeoutScanner.java)；[V4迁移](../backend/resource-app/src/main/resources/db/migration/V4__m1_follow_up.sql)；Bookings.vue通知列表 | notificationProcessingIsIdempotentAndStatisticsAreAdminOnly覆盖开始前提醒事件重复处理；已提供事件和站内查询，尚未接入外部发送，不能认定推送需求完整验收 |
+| M1-F02 提醒通知 | ResourceService的scheduleNotifications/processNotifications及取消通知插入；[TimeoutScanner.java](../backend/resource-app/src/main/java/cn/campus/resource/TimeoutScanner.java)；[原远端V4迁移](../backend/resource-app/src/main/resources/db/migration/V4__m1_follow_up.sql)及[本地事件V5扩展](../backend/resource-app/src/main/resources/db/migration/V5__m1_follow_up.sql)；Bookings.vue通知列表 | notificationProcessingIsIdempotentAndStatisticsAreAdminOnly覆盖开始前提醒事件重复处理；已提供事件和站内查询，尚未接入外部发送，不能认定推送需求完整验收 |
 | M1-F03 运营统计 | ResourceController的statistics入口；ResourceService的statistics；[types.ts](../frontend/src/lib/types.ts)的SeatStatistic；Admin.vue | 同一集成测试验证统计教室数、座位数及服务层管理员权限；尚缺统计数值与历史维修验证、页面教室筛选、接口HTTP403和增量e2e |
 
 V4属于resource应用的独立schema/迁移历史，与workflow应用同名版本不冲突。未来结构修复应新增迁移，不回改已经执行的V4。
+
+2026-11-15整合补充：用户确认目标数据库使用远端resource V4，因此本地分支原样保留该V4，用V5扩展类型约束以兼容程一帆的站内提醒。原本地V4移入历史资料，不参与Flyway执行。当前整合结果与验证见[合并记录](upstream-merge-20261115.md)。
 
 ## 提交、合并与CI证据
 

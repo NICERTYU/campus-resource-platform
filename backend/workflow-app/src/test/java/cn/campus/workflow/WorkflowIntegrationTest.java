@@ -36,7 +36,7 @@ import tools.jackson.databind.ObjectMapper;
 @Testcontainers
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class WorkflowIntegrationTest {
-  @Container static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:18.6");
+  @Container static final PostgreSQLContainer POSTGRES = new TestPostgres();
   static final ObjectMapper JSON = new ObjectMapper();
   static final String MODULE_KEY = "workflow-test-module-secret-32-characters";
   static final AtomicInteger REMOTE_STATUS = new AtomicInteger(200);

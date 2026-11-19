@@ -449,21 +449,34 @@ class ResourceService {
                 target.id(),
                 stamp(slot),
                 id);
-          scheduleNotifications(current.id(), id, input.startTime().toInstant(), input.endTime().toInstant());
+          scheduleNotifications(
+              current.id(), id, input.startTime().toInstant(), input.endTime().toInstant());
           audit(actor.id(), "RESERVATION_CREATED", "reservation", id, requestId);
           return reservation(id);
         });
   }
 
   Object reuse(User actor, long id, ReuseRequest input, String key, String requestId) {
-    if (!actor.has("STUDENT")) throw ApiError.forbidden();
+    require(actor, "STUDENT");
     if (input == null || input.startTime() == null || input.endTime() == null)
       throw ApiError.bad("请提供新的预约时段");
-    Reservation previous = reservation(id);
-    own(actor, id);
-    if (List.of("PENDING", "CHECKED_IN").contains(previous.status()))
-      throw ApiError.conflict("当前预约不能作为历史记录复用");
-    return reserve(actor, new ReserveRequest(previous.seatId(), input.startTime(), input.endTime()), key, requestId);
+    return mutate(
+        actor,
+        "reservation.reuse:" + id,
+        key,
+        input,
+        () -> {
+          Reservation source = reservation(id);
+          own(actor, id);
+          if (!List.of("CANCELLED", "NO_SHOW", "COMPLETED").contains(source.status()))
+            throw ApiError.conflict("只能复用已结束或已取消的本人历史预约");
+          // REQUIRED transaction propagation keeps the original reservation locks and validation.
+          return reserve(
+              actor,
+              new ReserveRequest(source.seatId(), input.startTime(), input.endTime()),
+              null,
+              requestId);
+        });
   }
 
   private void scheduleNotifications(long userId, long reservationId, Instant start, Instant end) {
@@ -600,6 +613,58 @@ class ResourceService {
                 e);
       }
     }
+    remind("STARTING_SOON");
+    remind("CHECK_IN_REMINDER");
+  }
+
+  private void remind(String type) {
+    // A single INSERT/SELECT records only a currently pending reservation in its live window.
+    Instant instant = now();
+    Instant earliest =
+        type.equals("STARTING_SOON") ? instant : instant.minus(Duration.ofMinutes(15));
+    Instant latest =
+        type.equals("STARTING_SOON")
+            ? instant.plus(Duration.ofMinutes(15))
+            : instant.minus(Duration.ofMinutes(10));
+    db.update(
+        "INSERT INTO reservation_notifications(reservation_id,user_id,type,created_at)"
+            + " SELECT id,user_id,?,? FROM reservations WHERE status='PENDING'"
+            + " AND start_time>=? AND start_time<=? AND check_in_deadline>?"
+            + " ON CONFLICT(reservation_id,type) DO NOTHING",
+        type,
+        stamp(instant),
+        stamp(earliest),
+        stamp(latest),
+        stamp(instant));
+  }
+
+  List<Map<String, Object>> notifications(User actor, int page, int pageSize) {
+    long offset = pageOffset(page, pageSize);
+    return db.query(
+        "SELECT n.*,s.label,c.name FROM reservation_notifications n"
+            + " JOIN reservations r ON r.id=n.reservation_id JOIN seats s ON s.id=r.seat_id"
+            + " JOIN classrooms c ON c.id=s.classroom_id WHERE n.user_id=?"
+            + " AND n.type IN ('STARTING_SOON','CHECK_IN_REMINDER','NO_SHOW_CANCELLED')"
+            + " ORDER BY n.created_at DESC,n.id DESC LIMIT ? OFFSET ?",
+        (rs, n) ->
+            Map.of(
+                "id",
+                rs.getLong("id"),
+                "reservationId",
+                rs.getLong("reservation_id"),
+                "classroomName",
+                rs.getString("name"),
+                "seatLabel",
+                rs.getString("label"),
+                "type",
+                rs.getString("type"),
+                "createdAt",
+                offset(rs, "created_at"),
+                "notificationStatus",
+                "AVAILABLE"),
+        actor.id(),
+        pageSize,
+        offset);
   }
 
   private void sweepLocked(long room, String requestId) {
@@ -650,10 +715,20 @@ class ResourceService {
           reservation.id());
     if (!maintenance)
       db.update(
-          "INSERT INTO reservation_notifications(reservation_id,user_id,type,scheduled_at,created_at)"
-              + " SELECT id,user_id,'CANCELLED_NOTICE',?,? FROM reservations WHERE id=?"
+          "INSERT INTO reservation_notifications(reservation_id,user_id,type,created_at)"
+              + " SELECT id,user_id,'NO_SHOW_CANCELLED',? FROM reservations WHERE id=?"
               + " ON CONFLICT(reservation_id,type) DO NOTHING",
-          stamp(now()), stamp(now()), reservation.id());
+          stamp(now()),
+          reservation.id());
+    if (!maintenance)
+      db.update(
+          "INSERT INTO"
+              + " reservation_notifications(reservation_id,user_id,type,scheduled_at,created_at)"
+              + " SELECT id,user_id,'CANCELLED_NOTICE',?,? FROM reservations WHERE id=? ON"
+              + " CONFLICT(reservation_id,type) DO NOTHING",
+          stamp(now()),
+          stamp(now()),
+          reservation.id());
     audit(
         null,
         maintenance ? "RESERVATION_MAINTENANCE_CANCELLED" : "RESERVATION_NO_SHOW",
@@ -686,11 +761,13 @@ class ResourceService {
         pageOffset);
   }
 
-  List<Notification> notifications(User actor, int page, int pageSize) {
+  List<Notification> scheduledNotifications(User actor, int page, int pageSize) {
     long pageOffset = pageOffset(page, pageSize);
     return db.query(
         "SELECT id,reservation_id,type,scheduled_at,status,delivered_at FROM"
-            + " reservation_notifications WHERE user_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
+            + " reservation_notifications WHERE user_id=?"
+            + " AND type IN ('PRE_START_REMINDER','NO_SHOW_WARNING','CANCELLED_NOTICE')"
+            + " ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
         (rs, n) ->
             new Notification(
                 rs.getLong("id"),
@@ -709,48 +786,57 @@ class ResourceService {
         status -> {
           Instant current = now();
           db.update(
-              "INSERT INTO reservation_notifications(reservation_id,user_id,type,scheduled_at,created_at)"
+              "INSERT INTO"
+                  + " reservation_notifications(reservation_id,user_id,type,scheduled_at,created_at)"
                   + " SELECT id,user_id,'PRE_START_REMINDER',start_time-interval '15 minutes',?"
-                  + " FROM reservations WHERE status='PENDING' ON CONFLICT(reservation_id,type) DO NOTHING",
+                  + " FROM reservations WHERE status='PENDING' ON CONFLICT(reservation_id,type) DO"
+                  + " NOTHING",
               stamp(current));
           db.update(
-              "INSERT INTO reservation_notifications(reservation_id,user_id,type,scheduled_at,created_at)"
-                  + " SELECT id,user_id,'NO_SHOW_WARNING',start_time+interval '10 minutes',?"
-                  + " FROM reservations WHERE status='PENDING' ON CONFLICT(reservation_id,type) DO NOTHING",
+              "INSERT INTO"
+                  + " reservation_notifications(reservation_id,user_id,type,scheduled_at,created_at)"
+                  + " SELECT id,user_id,'NO_SHOW_WARNING',start_time+interval '10 minutes',? FROM"
+                  + " reservations WHERE status='PENDING' ON CONFLICT(reservation_id,type) DO"
+                  + " NOTHING",
               stamp(current));
           db.update(
-              "UPDATE reservation_notifications n SET status='SENT',delivered_at=? FROM reservations r"
-                  + " WHERE n.reservation_id=r.id AND n.status='PENDING' AND n.scheduled_at<=?"
-                  + " AND ((n.type='PRE_START_REMINDER' AND r.status='PENDING')"
-                  + " OR (n.type='NO_SHOW_WARNING' AND r.status='PENDING')"
-                  + " OR n.type='CANCELLED_NOTICE')",
-              stamp(current), stamp(current));
+              "UPDATE reservation_notifications n SET status='SENT',delivered_at=? FROM"
+                  + " reservations r WHERE n.reservation_id=r.id AND n.status='PENDING' AND"
+                  + " n.scheduled_at<=? AND ((n.type='PRE_START_REMINDER' AND r.status='PENDING')"
+                  + " OR (n.type='NO_SHOW_WARNING' AND r.status='PENDING') OR"
+                  + " n.type='CANCELLED_NOTICE')",
+              stamp(current),
+              stamp(current));
           db.update(
-              "UPDATE reservation_notifications n SET status='SKIPPED' FROM reservations r"
-                  + " WHERE n.reservation_id=r.id AND n.status='PENDING' AND n.scheduled_at<=?"
-                  + " AND n.type IN('PRE_START_REMINDER','NO_SHOW_WARNING') AND r.status<>'PENDING'",
+              "UPDATE reservation_notifications n SET status='SKIPPED' FROM reservations r WHERE"
+                  + " n.reservation_id=r.id AND n.status='PENDING' AND n.scheduled_at<=? AND n.type"
+                  + " IN('PRE_START_REMINDER','NO_SHOW_WARNING') AND r.status<>'PENDING'",
               stamp(current));
         });
   }
 
-  List<Map<String, Object>> statistics(User actor, Long classroomId, OffsetDateTime from, OffsetDateTime to) {
+  List<Map<String, Object>> statistics(
+      User actor, Long classroomId, OffsetDateTime from, OffsetDateTime to) {
     require(actor, "ADMIN");
     TimeRules.interval(from, to);
     if (!from.toInstant().isBefore(to.toInstant())) throw ApiError.bad("统计时间范围不正确");
     return db.query(
-        "SELECT c.id,c.name,count(DISTINCT s.id)::int seat_count,"
-            + " COALESCE(sum(CASE WHEN r.status IN('PENDING','CHECKED_IN','COMPLETED') THEN"
-            + " EXTRACT(EPOCH FROM (LEAST(r.end_time,?::timestamptz)-GREATEST(r.start_time,?::timestamptz)))/3600 ELSE 0 END),0) reserved_hours,"
-            + " COALESCE(sum(CASE WHEN r.status IN('CHECKED_IN','COMPLETED') THEN"
-            + " EXTRACT(EPOCH FROM (LEAST(r.end_time,?::timestamptz)-GREATEST(r.start_time,?::timestamptz)))/3600 ELSE 0 END),0) used_hours,"
-            + " count(*) FILTER (WHERE r.status='CANCELLED')::int cancelled_count,"
-            + " count(*) FILTER (WHERE r.status='NO_SHOW')::int no_show_count,"
-            + " COALESCE((SELECT sum(EXTRACT(EPOCH FROM (LEAST(COALESCE(x.end_time,?::timestamptz),?::timestamptz)-GREATEST(x.start_time,?::timestamptz)))/3600)"
+        "SELECT c.id,c.name,count(DISTINCT s.id)::int seat_count, COALESCE(sum(CASE WHEN r.status"
+            + " IN('PENDING','CHECKED_IN','COMPLETED') THEN EXTRACT(EPOCH FROM"
+            + " (LEAST(r.end_time,?::timestamptz)-GREATEST(r.start_time,?::timestamptz)))/3600 ELSE"
+            + " 0 END),0) reserved_hours, COALESCE(sum(CASE WHEN r.status"
+            + " IN('CHECKED_IN','COMPLETED') THEN EXTRACT(EPOCH FROM"
+            + " (LEAST(r.end_time,?::timestamptz)-GREATEST(r.start_time,?::timestamptz)))/3600 ELSE"
+            + " 0 END),0) used_hours, count(*) FILTER (WHERE r.status='CANCELLED')::int"
+            + " cancelled_count, count(*) FILTER (WHERE r.status='NO_SHOW')::int no_show_count,"
+            + " COALESCE((SELECT sum(EXTRACT(EPOCH FROM"
+            + " (LEAST(COALESCE(x.end_time,?::timestamptz),?::timestamptz)-GREATEST(x.start_time,?::timestamptz)))/3600)"
             + " FROM restrictions x WHERE x.classroom_id=c.id AND x.source_type='M3' AND x.active"
-            + " AND x.start_time<?::timestamptz AND (x.end_time IS NULL OR x.end_time>?::timestamptz)),0) maintenance_hours"
-            + " FROM classrooms c LEFT JOIN seats s ON s.classroom_id=c.id"
-            + " LEFT JOIN reservations r ON r.seat_id=s.id AND r.start_time<?::timestamptz AND r.end_time>?::timestamptz"
-            + " WHERE (?::bigint IS NULL OR c.id=?) GROUP BY c.id,c.name ORDER BY c.id",
+            + " AND x.start_time<?::timestamptz AND (x.end_time IS NULL OR"
+            + " x.end_time>?::timestamptz)),0) maintenance_hours FROM classrooms c LEFT JOIN seats"
+            + " s ON s.classroom_id=c.id LEFT JOIN reservations r ON r.seat_id=s.id AND"
+            + " r.start_time<?::timestamptz AND r.end_time>?::timestamptz WHERE (?::bigint IS NULL"
+            + " OR c.id=?) GROUP BY c.id,c.name ORDER BY c.id",
         (rs, n) -> {
           int seats = rs.getInt("seat_count");
           double hours = Duration.between(from.toInstant(), to.toInstant()).toSeconds() / 3600d;
@@ -770,7 +856,19 @@ class ResourceService {
           row.put("to", to);
           return row;
         },
-        stamp(to), stamp(from), stamp(to), stamp(from), stamp(to), stamp(to), stamp(from), stamp(to), stamp(from), stamp(to), stamp(from), classroomId, classroomId);
+        stamp(to),
+        stamp(from),
+        stamp(to),
+        stamp(from),
+        stamp(to),
+        stamp(to),
+        stamp(from),
+        stamp(to),
+        stamp(from),
+        stamp(to),
+        stamp(from),
+        classroomId,
+        classroomId);
   }
 
   RestrictionResult restriction(String type, long sourceId, RestrictionInput input) {

@@ -23,6 +23,109 @@
   --el-text-color-primary: #203c40;
   --el-font-size-base: 14px;
 }
+.m1-date-input {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 7px;
+  color: inherit;
+  background: white;
+  font: inherit;
+}
+.booking-window {
+  color: #237a70;
+  font-size: 13px;
+}
+.m1-notification {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 20px 0;
+  border-bottom: 1px solid #e5ebe4;
+  overflow-wrap: anywhere;
+}
+.m1-notification > div {
+  min-width: 0;
+}
+.m1-statistics-filters {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(0, 1fr)) auto;
+  gap: 16px;
+  align-items: end;
+}
+.m1-statistics-filters .el-form-item {
+  min-width: 0;
+  margin-bottom: 0;
+}
+.m1-statistics-range {
+  margin: 20px 0 12px;
+}
+.m1-statistics-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 20px;
+}
+.m1-statistics-summary article {
+  padding: 20px;
+  background: #e9f0e6;
+  border-radius: 12px;
+  overflow-wrap: anywhere;
+}
+.m1-statistics-summary span {
+  display: block;
+  font-size: 13px;
+}
+.m1-statistics-summary strong {
+  display: block;
+  margin-top: 8px;
+  font-size: 24px;
+}
+.m1-statistics-rooms {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.m1-statistics-room {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.m1-statistics-room dl > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 10px 0;
+}
+.m1-statistics-room dt {
+  color: #7b8b8a;
+}
+.m1-statistics-room dd {
+  margin: 0;
+}
+@media (max-width: 900px) {
+  .m1-statistics-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .m1-statistics-rooms {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 480px) {
+  .m1-statistics-filters {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .m1-statistics-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .m1-notification {
+    flex-direction: column;
+  }
+}
 * {
   box-sizing: border-box;
 }

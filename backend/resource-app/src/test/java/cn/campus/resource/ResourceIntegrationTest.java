@@ -6,11 +6,14 @@ import static org.junit.jupiter.api.Assertions.*;
 import com.fasterxml.jackson.databind.*;
 import java.net.*;
 import java.net.http.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.*;
@@ -23,7 +26,7 @@ class ResourceIntegrationTest {
   static final String MODULE_KEY = "resource-integration-module-key-32-characters";
   static final AtomicReference<Instant> TIME =
       new AtomicReference<>(Instant.parse("2026-10-12T01:50:00Z"));
-  final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:18.6");
+  final PostgreSQLContainer postgres = new TestPostgres();
   ConfigurableApplicationContext app;
   ResourceService service;
   JdbcTemplate db;
@@ -115,7 +118,7 @@ class ResourceIntegrationTest {
     assertEquals(6, db.queryForObject("SELECT count(*) FROM users", Integer.class));
     assertEquals(72, db.queryForObject("SELECT count(*) FROM seats", Integer.class));
     assertEquals(
-            4,
+        5,
         db.queryForObject(
             "SELECT count(*) FROM flyway_schema_history WHERE success AND version IS NOT NULL",
             Integer.class));
@@ -153,7 +156,7 @@ class ResourceIntegrationTest {
               "SELECT display_name FROM resource_upgrade.users WHERE username='retained'",
               String.class));
       assertEquals(
-          4,
+          5,
           db.queryForObject(
               "SELECT count(*) FROM resource_upgrade.flyway_schema_history WHERE success AND"
                   + " version IS NOT NULL",
@@ -174,6 +177,141 @@ class ResourceIntegrationTest {
     } finally {
       db.execute("DROP SCHEMA IF EXISTS resource_upgrade CASCADE");
     }
+  }
+
+  @Test
+  void upstreamVersionFourUpgradePreservesExistingDataAndSupportsLocalEvents(
+      @TempDir Path publishedMigrations) throws Exception {
+    var item = (Reservation) service.reserve(user("student"), booking(1), null, "upgrade-v4");
+    // Use a frozen copy of the published V4, not the active V4 under test, to establish history.
+    for (String filename :
+        List.of(
+            "V1__resource_schema.sql",
+            "V2__reservation_lookup_indexes.sql",
+            "V3__case_insensitive_usernames.sql",
+            "V4__m1_follow_up.sql")) {
+      String location = filename.startsWith("V4") ? "/db/upstream-v4/" : "/db/migration/";
+      try (var source = getClass().getResourceAsStream(location + filename)) {
+        assertNotNull(source, filename);
+        Files.copy(source, publishedMigrations.resolve(filename));
+      }
+    }
+    var legacy =
+        org.flywaydb.core.Flyway.configure()
+            .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
+            .schemas("resource_upgrade_v4")
+            .defaultSchema("resource_upgrade_v4")
+            .locations("filesystem:" + publishedMigrations)
+            .load();
+    try {
+      legacy.migrate();
+      for (String table : List.of("users", "classrooms", "seats", "reservations"))
+        db.update("INSERT INTO resource_upgrade_v4." + table + " SELECT * FROM resource." + table);
+      db.update(
+          "INSERT INTO resource_upgrade_v4.reservation_notifications"
+              + " (reservation_id,user_id,type,scheduled_at,status,delivered_at,created_at)"
+              + " VALUES(?,?,'PRE_START_REMINDER',?,'SENT',?,?),"
+              + " (?,?,'NO_SHOW_WARNING',?,'PENDING',NULL,?),"
+              + " (?,?,'CANCELLED_NOTICE',?,'SKIPPED',NULL,?)",
+          item.id(),
+          user("student").id(),
+          from().minusMinutes(15),
+          from(),
+          from(),
+          item.id(),
+          user("student").id(),
+          from().plusMinutes(10),
+          from(),
+          item.id(),
+          user("student").id(),
+          from().plusMinutes(15),
+          from());
+      var before =
+          db.queryForList(
+              "SELECT * FROM resource_upgrade_v4.reservation_notifications ORDER BY id");
+      var checksum =
+          db.queryForObject(
+              "SELECT checksum FROM resource_upgrade_v4.flyway_schema_history WHERE version='4'",
+              Integer.class);
+      var latest =
+          org.flywaydb.core.Flyway.configure()
+              .dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
+              .schemas("resource_upgrade_v4")
+              .defaultSchema("resource_upgrade_v4")
+              .locations("classpath:db/migration")
+              .load();
+      // migrate validates the published V4 checksum while applying the pending V5.
+      assertEquals(1, latest.migrate().migrationsExecuted);
+      latest.validate();
+      assertEquals(
+          checksum,
+          db.queryForObject(
+              "SELECT checksum FROM resource_upgrade_v4.flyway_schema_history WHERE version='4'",
+              Integer.class));
+      assertEquals(
+          before,
+          db.queryForList(
+              "SELECT * FROM resource_upgrade_v4.reservation_notifications ORDER BY id"));
+      assertEquals(
+          1,
+          db.queryForObject(
+              "SELECT count(*) FROM resource_upgrade_v4.reservations WHERE id=? AND"
+                  + " status='PENDING'",
+              Integer.class,
+              item.id()));
+      db.update(
+          "INSERT INTO resource_upgrade_v4.reservation_notifications"
+              + " (reservation_id,user_id,type,created_at)"
+              + " VALUES(?,?,'STARTING_SOON',?)",
+          item.id(),
+          user("student").id(),
+          from());
+      assertEquals(
+          4,
+          db.queryForObject(
+              "SELECT count(*) FROM resource_upgrade_v4.reservation_notifications", Integer.class));
+      assertEquals(0, latest.migrate().migrationsExecuted);
+    } finally {
+      db.execute("DROP SCHEMA IF EXISTS resource_upgrade_v4 CASCADE");
+    }
+  }
+
+  @Test
+  void bothNotificationHttpContractsRemainScopedAndDoNotMixEventTypes() throws Exception {
+    var item = (Reservation) service.reserve(user("student"), booking(1), null, "merged-notify");
+    TIME.set(from().minusMinutes(15).toInstant());
+    service.sweep();
+    service.processNotifications();
+    service.processNotifications();
+    var student = login("student");
+    var local = send(student, "GET", "/api/v1/reservations/notifications", null, null);
+    assertEquals(200, local.statusCode(), local.body());
+    var saved = json.readTree(local.body());
+    assertEquals(1, saved.size());
+    assertEquals("STARTING_SOON", saved.get(0).get("type").asText());
+    assertEquals("AVAILABLE", saved.get(0).get("notificationStatus").asText());
+    var upstream = send(student, "GET", "/api/v1/notifications/mine", null, null);
+    assertEquals(200, upstream.statusCode(), upstream.body());
+    var planned = json.readTree(upstream.body());
+    assertEquals(2, planned.size());
+    assertTrue(planned.findValuesAsText("type").contains("PRE_START_REMINDER"));
+    assertFalse(planned.findValuesAsText("type").contains("STARTING_SOON"));
+    var other = login("student2");
+    for (String path :
+        List.of("/api/v1/reservations/notifications", "/api/v1/notifications/mine")) {
+      var response = send(other, "GET", path, null, null);
+      assertEquals(200, response.statusCode());
+      assertTrue(json.readTree(response.body()).isEmpty());
+      assertEquals(401, send(HttpClient.newHttpClient(), "GET", path, null, null).statusCode());
+    }
+    String csrf =
+        json.readTree(send(student, "GET", "/api/v1/auth/csrf", null, null).body())
+            .get("token")
+            .asText();
+    assertEquals(
+        400,
+        send(student, "POST", "/api/v1/reservations/" + item.id() + "/reuse", "{}", csrf)
+            .statusCode());
   }
 
   @Test
@@ -272,7 +410,8 @@ class ResourceIntegrationTest {
 
   @Test
   void historicalReservationCanBeReusedOnlyByOwnerAndSchedulesNotifications() {
-    Reservation item = (Reservation) service.reserve(user("student"), booking(1), null, "reuse-source");
+    Reservation item =
+        (Reservation) service.reserve(user("student"), booking(1), null, "reuse-source");
     TIME.set(from().plusMinutes(15).toInstant());
     service.sweep();
     Reservation reused =
@@ -284,10 +423,21 @@ class ResourceIntegrationTest {
                 "reuse-new",
                 "reuse-request");
     assertEquals("PENDING", reused.status());
-    assertEquals(2, db.queryForObject("SELECT count(*) FROM reservation_notifications WHERE reservation_id=?", Integer.class, reused.id()));
+    assertEquals(
+        2,
+        db.queryForObject(
+            "SELECT count(*) FROM reservation_notifications WHERE reservation_id=?",
+            Integer.class,
+            reused.id()));
     assertThrows(
         ApiError.class,
-        () -> service.reuse(user("student2"), item.id(), new ReuseRequest(from().plusDays(1), from().plusDays(1).plusHours(1)), null, "wrong-owner"));
+        () ->
+            service.reuse(
+                user("student2"),
+                item.id(),
+                new ReuseRequest(from().plusDays(1), from().plusDays(1).plusHours(1)),
+                null,
+                "wrong-owner"));
   }
 
   @Test
@@ -296,12 +446,26 @@ class ResourceIntegrationTest {
     TIME.set(from().minusMinutes(15).toInstant());
     service.processNotifications();
     service.processNotifications();
-    assertEquals(1, db.queryForObject("SELECT count(*) FROM reservation_notifications WHERE reservation_id=? AND type='PRE_START_REMINDER'", Integer.class, item.id()));
-    assertEquals("SENT", db.queryForObject("SELECT status FROM reservation_notifications WHERE reservation_id=? AND type='PRE_START_REMINDER'", String.class, item.id()));
+    assertEquals(
+        1,
+        db.queryForObject(
+            "SELECT count(*) FROM reservation_notifications WHERE reservation_id=? AND"
+                + " type='PRE_START_REMINDER'",
+            Integer.class,
+            item.id()));
+    assertEquals(
+        "SENT",
+        db.queryForObject(
+            "SELECT status FROM reservation_notifications WHERE reservation_id=? AND"
+                + " type='PRE_START_REMINDER'",
+            String.class,
+            item.id()));
     var statistics = service.statistics(user("admin"), null, from(), from().plusDays(1));
     assertEquals(3, statistics.size());
     assertEquals(24, ((Number) statistics.getFirst().get("seatCount")).intValue());
-    assertThrows(ApiError.class, () -> service.statistics(user("student"), null, from(), from().plusDays(1)));
+    assertThrows(
+        ApiError.class,
+        () -> service.statistics(user("student"), null, from(), from().plusDays(1)));
   }
 
   @Test
@@ -894,6 +1058,256 @@ class ResourceIntegrationTest {
                 send(student, "GET", "/api/v1/reservations/mine?statusGroup=current", null, null)
                     .body())
             .isEmpty());
+  }
+
+  @Test
+  void historyReuseCreatesNewOwnedReservationAndReplaysIdempotently() throws Exception {
+    var student = user("student");
+    var old = (Reservation) service.reserve(student, booking(1), null, "m1-original");
+    service.cancel(student, old.id(), null, "m1-cancel");
+    var input = new ReuseRequest(from().plusDays(1), from().plusDays(1).plusHours(1));
+    var first = service.reuse(student, old.id(), input, "reuse-key", "m1-reuse");
+    var again = service.reuse(student, old.id(), input, "reuse-key", "m1-repeat");
+    var transport = app.getBean(tools.jackson.databind.ObjectMapper.class);
+    assertEquals(transport.writeValueAsString(first), transport.writeValueAsString(again));
+    assertNotEquals(old.id(), ((Reservation) first).id());
+    assertEquals("CANCELLED", service.reservation(old.id()).status());
+    assertEquals(2, db.queryForObject("SELECT count(*) FROM reservations", Integer.class));
+    assertEquals(
+        409,
+        assertThrows(
+                ApiError.class,
+                () ->
+                    service.reuse(
+                        student,
+                        old.id(),
+                        new ReuseRequest(from().plusDays(2), from().plusDays(2).plusHours(1)),
+                        "reuse-key",
+                        "m1-changed"))
+            .status);
+  }
+
+  @Test
+  void historyReuseRejectsOtherOwnersCurrentRecordsAndRemovedRoles() {
+    var old = (Reservation) service.reserve(user("student"), booking(1), null, "m1-source");
+    var input = new ReuseRequest(from().plusDays(1), from().plusDays(1).plusHours(1));
+    assertEquals(
+        409,
+        assertThrows(
+                ApiError.class,
+                () -> service.reuse(user("student"), old.id(), input, null, "m1-current"))
+            .status);
+    service.cancel(user("student"), old.id(), null, "m1-cancel");
+    for (String username : List.of("student2", "admin", "technician"))
+      assertEquals(
+          403,
+          assertThrows(
+                  ApiError.class,
+                  () -> service.reuse(user(username), old.id(), input, null, "m1-foreign"))
+              .status);
+    db.update("DELETE FROM user_roles WHERE user_id=? AND role='STUDENT'", user("student").id());
+    assertEquals(
+        403,
+        assertThrows(
+                ApiError.class,
+                () -> service.reuse(user("student"), old.id(), input, null, "m1-role"))
+            .status);
+  }
+
+  @Test
+  void historyReuseRevalidatesDatesDurationOpeningSeatAndDepartment() {
+    var old = (Reservation) service.reserve(user("student"), booking(25), null, "m1-source");
+    service.cancel(user("student"), old.id(), null, "m1-cancel");
+    for (var input :
+        List.of(
+            new ReuseRequest(from().minusDays(1), from().minusDays(1).plusHours(1)),
+            new ReuseRequest(from().plusDays(31), from().plusDays(31).plusHours(1)),
+            new ReuseRequest(from().plusDays(1), from().plusDays(1).plusHours(5)),
+            new ReuseRequest(from().plusDays(1).withHour(7), from().plusDays(1).withHour(8)),
+            new ReuseRequest(from().plusDays(1).plusMinutes(1), from().plusDays(1).plusHours(1))))
+      assertEquals(
+          400,
+          assertThrows(
+                  ApiError.class,
+                  () -> service.reuse(user("student"), old.id(), input, null, "m1-validation"))
+              .status);
+    var valid = new ReuseRequest(from().plusDays(1), from().plusDays(1).plusHours(1));
+    db.update("UPDATE seats SET enabled=false WHERE id=25");
+    assertEquals(
+        409,
+        assertThrows(
+                ApiError.class,
+                () -> service.reuse(user("student"), old.id(), valid, null, "m1-disabled"))
+            .status);
+    db.update("UPDATE seats SET enabled=true WHERE id=25");
+    db.update("UPDATE users SET department='ART' WHERE username='student'");
+    assertEquals(
+        403,
+        assertThrows(
+                ApiError.class,
+                () -> service.reuse(user("student"), old.id(), valid, null, "m1-department"))
+            .status);
+  }
+
+  @Test
+  void historyReuseRevalidatesM2AndM3Restrictions() {
+    var old = (Reservation) service.reserve(user("student"), booking(1), null, "m1-source");
+    service.cancel(user("student"), old.id(), null, "m1-cancel");
+    var input = new ReuseRequest(from().plusDays(1), from().plusDays(1).plusHours(1));
+    service.restriction(
+        "M2",
+        910,
+        new RestrictionInput(
+            1, true, 1, input.startTime(), input.endTime(), user("admin").id(), "m1-m2"));
+    assertEquals(
+        409,
+        assertThrows(
+                ApiError.class,
+                () -> service.reuse(user("student"), old.id(), input, null, "m1-conflict"))
+            .status);
+    service.restriction(
+        "M2",
+        910,
+        new RestrictionInput(
+            2, false, 1, input.startTime(), input.endTime(), user("admin").id(), "m1-release"));
+    service.restriction(
+        "M3", 911, new RestrictionInput(1, true, 1, from(), null, user("admin").id(), "m1-m3"));
+    assertEquals(
+        409,
+        assertThrows(
+                ApiError.class,
+                () -> service.reuse(user("student"), old.id(), input, null, "m1-maintenance"))
+            .status);
+  }
+
+  @Test
+  void remindersArePersistentScopedAndUniqueAtActualScanBoundaries() {
+    service.reserve(user("student"), booking(1), null, "m1-remind");
+    TIME.set(from().minusMinutes(15).minusSeconds(1).toInstant());
+    service.sweep();
+    assertTrue(service.notifications(user("student"), 1, 50).isEmpty());
+    TIME.set(from().minusMinutes(15).toInstant());
+    service.sweep();
+    service.sweep();
+    assertEquals(1, service.notifications(user("student"), 1, 50).size());
+    TIME.set(from().plusMinutes(10).minusSeconds(1).toInstant());
+    service.sweep();
+    assertEquals(1, service.notifications(user("student"), 1, 50).size());
+    TIME.set(from().plusMinutes(10).toInstant());
+    service.sweep();
+    service.sweep();
+    assertEquals(2, service.notifications(user("student"), 1, 50).size());
+    assertTrue(service.notifications(user("student2"), 1, 50).isEmpty());
+    TIME.set(from().plusMinutes(15).toInstant());
+    service.sweep();
+    service.sweep();
+    var events = service.notifications(user("student"), 1, 50);
+    assertEquals(3, events.size());
+    assertEquals("NO_SHOW_CANCELLED", events.getFirst().get("type"));
+    assertEquals("AVAILABLE", events.getFirst().get("notificationStatus"));
+    assertEquals(1, service.notifications(user("student"), 2, 1).size());
+    assertEquals(
+        400,
+        assertThrows(ApiError.class, () -> service.notifications(user("student"), 0, 50)).status);
+    assertEquals(1, db.queryForObject("SELECT count(*) FROM violations", Integer.class));
+  }
+
+  @Test
+  void checkedInAndMaintenanceCancelledReservationsDoNotReceiveFalseNoShowEvents() {
+    var first = (Reservation) service.reserve(user("student"), booking(1), null, "m1-book");
+    service.checkIn(user("student"), first.id(), "246810", null, "m1-in");
+    service.reserve(user("student2"), booking(2), null, "m1-book-other");
+    service.restriction(
+        "M3",
+        912,
+        new RestrictionInput(1, true, 1, from(), null, user("admin").id(), "m1-maintenance"));
+    TIME.set(from().plusMinutes(15).toInstant());
+    service.sweep();
+    assertTrue(service.notifications(user("student"), 1, 50).isEmpty());
+    assertTrue(service.notifications(user("student2"), 1, 50).isEmpty());
+    assertEquals(0, db.queryForObject("SELECT count(*) FROM violations", Integer.class));
+  }
+
+  @Test
+  void operationalStatisticsUseFullCountsClippedHoursAndMergedMaintenance() {
+    var first = (Reservation) service.reserve(user("student"), booking(1), null, "m1-book");
+    service.checkIn(user("student"), first.id(), "246810", null, "m1-in");
+    var second =
+        (Reservation) service.reserve(user("student2"), booking(2), null, "m1-book-cancel");
+    service.cancel(user("student2"), second.id(), null, "m1-cancel");
+    service.reserve(
+        user("student2"),
+        new ReserveRequest(2, from().plusHours(1), from().plusHours(2)),
+        null,
+        "m1-no-show");
+    TIME.set(from().plusHours(2).toInstant());
+    service.sweep();
+    service.restriction(
+        "M3", 913, new RestrictionInput(1, true, 1, from(), null, user("admin").id(), "m1-m3-a"));
+    TIME.set(from().plusHours(2).plusMinutes(30).toInstant());
+    service.restriction(
+        "M3", 914, new RestrictionInput(1, true, 1, from(), null, user("admin").id(), "m1-m3-b"));
+    TIME.set(from().plusHours(3).toInstant());
+    service.restriction(
+        "M3",
+        913,
+        new RestrictionInput(2, false, 1, from(), null, user("admin").id(), "m1-release-a"));
+    TIME.set(from().plusHours(3).plusMinutes(30).toInstant());
+    var auth =
+        new org.springframework.security.authentication.UsernamePasswordAuthenticationToken(
+            "admin", null);
+    var stats = app.getBean(ReservationStatistics.class);
+    var row = stats.report(auth, from().toLocalDate(), from().toLocalDate(), 1L).rows().getFirst();
+    assertEquals(3, row.reservationCount());
+    assertEquals(1, row.cancelledCount());
+    assertEquals(1, row.noShowCount());
+    assertEquals(1.0, row.bookedSeatHours(), 0.0001);
+    assertEquals(336.0, row.capacitySeatHours(), 0.0001);
+    assertEquals(36.0, row.maintenanceSeatHours(), 0.0001);
+    assertEquals(1.0 / 336, row.utilization(), 0.0001);
+    db.update("UPDATE seats SET enabled=false WHERE classroom_id=1");
+    assertNull(
+        stats
+            .report(auth, from().toLocalDate(), from().toLocalDate(), 1L)
+            .rows()
+            .getFirst()
+            .utilization());
+  }
+
+  @Test
+  void m1StatisticsAndNotificationsEnforceRealHttpPermissionsAndValidation() throws Exception {
+    var anonymous = HttpClient.newHttpClient();
+    String path = "/api/v1/admin/reservation-statistics?startDate=2026-10-12&endDate=2026-10-12";
+    assertEquals(401, send(anonymous, "GET", path, null, null).statusCode());
+    var student = login("student");
+    var forbidden = send(student, "GET", path, null, null);
+    assertEquals(403, forbidden.statusCode());
+    assertFalse(json.readTree(forbidden.body()).get("requestId").asText().isBlank());
+    assertEquals(
+        200, send(student, "GET", "/api/v1/reservations/notifications", null, null).statusCode());
+    var admin = login("admin");
+    var report = send(admin, "GET", path, null, null);
+    assertEquals(200, report.statusCode(), report.body());
+    assertEquals(3, json.readTree(report.body()).get("rows").size());
+    assertFalse(report.body().contains("username"));
+    assertEquals(
+        400,
+        send(
+                admin,
+                "GET",
+                "/api/v1/admin/reservation-statistics?startDate=2026-10-12&endDate=2026-11-12",
+                null,
+                null)
+            .statusCode());
+    assertEquals(
+        400,
+        send(
+                admin,
+                "GET",
+                "/api/v1/admin/reservation-statistics?startDate=2026-10-13&endDate=2026-10-12",
+                null,
+                null)
+            .statusCode());
   }
 
   HttpClient login(String username) throws Exception {

@@ -13,7 +13,7 @@
 - `POST /reservations` `{seatId,startTime,endTime}`；`GET /reservations/mine`；`POST /reservations/{id}/cancel`；`POST /reservations/{id}/check-in` `{code}`。
 - `POST /reservations/{id}/reuse` `{startTime,endTime}` → 使用本人历史预约的座位发起一条新的预约；服务端重新校验时间、权限、开放时间、冲突和维修/审批限制，不复制原预约状态。
 - 预约：`{id,seatId,seatLabel,classroomId,classroomName,startTime,endTime,status,checkInDeadline,checkedInAt,cancelReason}`，状态 `PENDING,CHECKED_IN,CANCELLED,NO_SHOW,COMPLETED`。
-- `GET /notifications/mine?page=1&pageSize=50` → `{id,reservationId,type,scheduledAt,status,deliveredAt}`；通知类型为 `PRE_START_REMINDER`、`NO_SHOW_WARNING`、`CANCELLED_NOTICE`。同一预约和类型只产生一条事件，扫描重复执行安全。
+- `GET /notifications/mine?page=1&pageSize=50` → 本人计划通知数组 `[{id,reservationId,type,scheduledAt,status,deliveredAt}]`；通知类型为 `PRE_START_REMINDER`、`NO_SHOW_WARNING`、`CANCELLED_NOTICE`，status为PENDING/SENT/SKIPPED。同一预约和类型只产生一条事件，扫描重复执行安全。SENT表示已处理为站内可查询事件，不表示短信、邮件或微信送达。该接口与下文 `/reservations/notifications` 分别按事件类型过滤，互不混入另一种响应格式。
 - `GET /violations/mine` → 数组；管理端 `GET /admin/users`，`GET /admin/check-in-codes`，`GET /admin/audit-logs`，`GET/PUT /admin/settings`（`{maxReservationHours}`），`POST /admin/classrooms`，`PUT /admin/classrooms/{id}`，`POST /admin/classrooms/{id}/seats`，`PUT /admin/seats/{id}`。
 - 签到码由管理员每天为每教室设置，`PUT /admin/check-in-codes/{classroomId}` `{code}`，存储摘要，查询只返回已设置的教室及日期。演示初始化设置当天码 `246810`。
 - `GET /admin/seat-statistics?from=&to=&classroomId=` → 按教室返回 `seatCount,reservedHours,usedHours,utilizationRate,cancelledCount,noShowCount,maintenanceHours`；仅ADMIN可访问，统计范围使用带偏移的 ISO 8601 时间。
@@ -29,6 +29,14 @@
 - 账号为 `{id,username,displayName,department,roles,enabled}`；任何账号接口均不返回密码或密码摘要。密码仅以BCrypt存储；包含密码的幂等请求指纹使用服务端密钥HMAC，幂等结果和审计不保存明文密码。
 - 不能停用自己的账号或移除自己的ADMIN角色，必须保留至少一个启用的管理员。修改角色、院系、启停状态或密码后使目标账号已有登录失效；只改姓名保留会话。重新登录后使用新权限，重放同一幂等请求不会再次注销新会话。
 - 派单使用 `GET /admin/users?role=TECHNICIAN`，只返回启用的维修人员；按角色筛选不受其他学生账号数量影响。原无role接口仍为兼容的人员选择列表，新账号管理必须使用分页的 `/admin/accounts`。
+
+## M1 页面联调补充（CYF）
+
+以下为程一帆页面所需的最小资源应用支持，新增接口，不改变原预约接口。详细验收、统计口径与人工待办见 [M1 交付](m1-cyf-delivery.md)。
+
+- `POST /reservations/{id}/reuse` `{startTime,endTime}` → 新预约。示例：`{"startTime":"2026-11-06T10:00:00+08:00","endTime":"2026-11-06T11:00:00+08:00"}`。仅STUDENT复用本人终态记录（CANCELLED/NO_SHOW/COMPLETED），原记录不改；服务端从原记录取seatId，忽略客户端自报归属，复用原预约的完整校验、锁与幂等机制。旧日期必须重新选择；过去/非整点/超30天/超时长400，无权限403，当前记录/停用/占用409，不存在404。失败保留确认框与真实请求编号，禁止自动改时间或重放。
+- `GET /reservations/notifications?page=1&pageSize=50` → 本人站内事件数组，倒序分页。`{id,reservationId,classroomName,seatLabel,type,createdAt,notificationStatus}`，type为STARTING_SOON（开始前15分钟内）、CHECK_IN_REMINDER（开始后10分钟至15分钟内）、NO_SHOW_CANCELLED（实际未签到取消）。示例：`{"id":1,"reservationId":10,"classroomName":"知行101","seatLabel":"A01","type":"STARTING_SOON","createdAt":"2026-11-06T09:45:00+08:00","notificationStatus":"AVAILABLE"}`。V4持久化事件，每预约每类型最多一次，重复扫描不重复插入；不补发已错过窗口的提醒。AVAILABLE只表示站内可查询，不代表邮件/微信/短信或浏览器推送已送达。页面时钟只显示签到窗口提示，不自行取消预约或伪造通知；到期等待服务端刷新确认。
+- `GET /admin/reservation-statistics?startDate=2026-11-01&endDate=2026-11-07&classroomId=1` → `{startDate,endDate,rows:[{classroomId,classroomName,reservationCount,cancelledCount,noShowCount,maintenanceCancelledCount,bookedSeatHours,capacitySeatHours,maintenanceSeatHours,utilization}]}`。仅ADMIN；classroomId可省略，日期为上海自然日、含首尾，最多31天。计数按预约开始日归属，小时按查询窗口与每日开放区间裁剪。bookedSeatHours仅计有效PENDING（尚未过签到截止）、CHECKED_IN、COMPLETED；utilization=bookedSeatHours/capacitySeatHours，为预约占用率，不等于实际到场率。capacity按当前启用教室/座位及开放时间，不追溯历史配置；维修小时对M3来源区间取并集，已解除取releasedAt，仍生效只统计至服务端当前时间，不预测未来维修。无容量时utilization为null。返回聚合数据，不包含学生身份。筛选失败清空旧结果，不用本页预约条数充当全量统计。
 
 ## 流程应用（8082）
 

@@ -69,6 +69,14 @@ class ResourceController {
     return service.cancel(actor(auth), id, key(request), RequestIds.of(request));
   }
 
+  @GetMapping("/reservations/notifications")
+  Object notifications(
+      Authentication auth,
+      @RequestParam(defaultValue = "1") int page,
+      @RequestParam(defaultValue = "50") int pageSize) {
+    return service.notifications(actor(auth), page, pageSize);
+  }
+
   record Code(String code) {}
 
   @PostMapping("/reservations/{id}/check-in")
@@ -89,11 +97,11 @@ class ResourceController {
   }
 
   @GetMapping("/notifications/mine")
-  Object notifications(
+  Object scheduledNotifications(
       Authentication auth,
       @RequestParam(defaultValue = "1") int page,
       @RequestParam(defaultValue = "50") int pageSize) {
-    return service.notifications(actor(auth), page, pageSize);
+    return service.scheduledNotifications(actor(auth), page, pageSize);
   }
 
   @GetMapping("/admin/users")

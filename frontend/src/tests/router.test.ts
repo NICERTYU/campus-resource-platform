@@ -6,6 +6,7 @@ import { useAuth } from '../stores/auth'
 // Test real route guards without loading page widgets; UI and browser tests cover the real pages.
 vi.mock('../pages/Seats.vue', () => ({ default: { render: () => null } }))
 vi.mock('../pages/Accounts.vue', () => ({ default: { render: () => null } }))
+vi.mock('../pages/Statistics.vue', () => ({ default: { render: () => null } }))
 vi.mock('../pages/Login.vue', () => ({ default: { render: () => null } }))
 vi.mock('../pages/Register.vue', () => ({ default: { render: () => null } }))
 
@@ -19,6 +20,8 @@ describe('registration and account route access', () => {
     expect(router.currentRoute.value.path).toBe('/register')
     await router.push('/admin/accounts')
     expect(router.currentRoute.value.path).toBe('/login')
+    await router.push('/admin/statistics')
+    expect(router.currentRoute.value.path).toBe('/login')
   })
   it('denies account management to student roles and redirects authenticated registration to seats', async () => {
     useAuth().user = {
@@ -29,6 +32,8 @@ describe('registration and account route access', () => {
       roles: ['STUDENT'],
     }
     await router.push('/admin/accounts')
+    expect(router.currentRoute.value.path).toBe('/seats')
+    await router.push('/admin/statistics')
     expect(router.currentRoute.value.path).toBe('/seats')
     await router.push('/register')
     expect(router.currentRoute.value.path).toBe('/seats')
@@ -43,6 +48,9 @@ describe('registration and account route access', () => {
     }
     await router.push('/admin/accounts')
     expect(router.currentRoute.value.path).toBe('/admin/accounts')
+    expect(router.currentRoute.value.meta.admin).toBe(true)
+    await router.push('/admin/statistics')
+    expect(router.currentRoute.value.path).toBe('/admin/statistics')
     expect(router.currentRoute.value.meta.admin).toBe(true)
   })
 })

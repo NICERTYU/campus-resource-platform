@@ -27,7 +27,7 @@ class AccountIntegrationTest {
   static final String MODULE_KEY = "account-integration-module-key-32-characters";
   static final AtomicReference<CountDownLatch> LOGIN_ENTERED = new AtomicReference<>();
   static final AtomicReference<CountDownLatch> LOGIN_CONTINUE = new AtomicReference<>();
-  final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:18.6");
+  final PostgreSQLContainer postgres = new TestPostgres();
   final ObjectMapper json = new ObjectMapper();
   ConfigurableApplicationContext app;
   JdbcTemplate db;

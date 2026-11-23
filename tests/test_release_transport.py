@@ -36,6 +36,26 @@ if name == "ssh" and args[-1].startswith("bash -s --") and os.environ.get("FAKE_
     sys.exit(17)
 '''
 
+CURL = r'''#!/usr/bin/env python3
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+if os.environ.get("FAKE_PUBLIC_FAILURE"):
+    sys.exit(60)
+url = args[-1]
+destination = Path(args[args.index("-o") + 1])
+status = 200
+if url.endswith("/auth/csrf"):
+    destination.write_text('{"token":"test-token"}')
+elif url.endswith("/classroom-applications"):
+    destination.write_text('{"code":"UNAUTHENTICATED"}')
+    status = 401
+if "-w" in args:
+    print(status)
+'''
+
 
 class ReleaseTransportTests(unittest.TestCase):
     def setUp(self):
@@ -49,6 +69,8 @@ class ReleaseTransportTests(unittest.TestCase):
         shutil.copyfile(ROOT / "scripts/install-verified-release.sh",
                         self.root / "scripts/install-verified-release.sh")
         shutil.copyfile(ROOT / "deploy/remote-install.sh", self.root / "deploy/remote-install.sh")
+        shutil.copyfile(ROOT / "deploy/confirm-release.sh", self.root / "deploy/confirm-release.sh")
+        shutil.copyfile(ROOT / "scripts/smoke-release.sh", self.root / "scripts/smoke-release.sh")
         self.artifacts = self.root / ".local/artifact"
         self.artifacts.mkdir(parents=True)
         for name in ("source", "images"):
@@ -61,6 +83,9 @@ class ReleaseTransportTests(unittest.TestCase):
             cli = self.bin / name
             cli.write_text(CLI)
             cli.chmod(0o755)
+        curl = self.bin / "curl"
+        curl.write_text(CURL)
+        curl.chmod(0o755)
         self.log = self.root / "transport.jsonl"
         self.environment = dict(
             os.environ, PATH=str(self.bin) + os.pathsep + os.environ["PATH"],
@@ -68,7 +93,7 @@ class ReleaseTransportTests(unittest.TestCase):
             SSH_HOST="example.invalid", SSH_USER="deployer", SSH_PORT="2222",
             SSH_KEY="private-key-test-sentinel", SSH_KNOWN_HOSTS="known-host-test-sentinel",
             DEPLOY_ROOT="/srv/campus releases", DEPLOY_ENV_FILE="/srv/private/test env",
-            GITHUB_SHA=REVISION,
+            GITHUB_SHA=REVISION, SMOKE_URL="",
         )
 
     def install(self, project="campus-test", **environment):
@@ -149,16 +174,34 @@ class ReleaseTransportTests(unittest.TestCase):
         self.assertEqual(shlex.split(self.commands()[-1]["args"][-1])[-1], "campus-prod")
         self.assert_private_files_cleaned(result)
 
+    def test_public_check_success_confirms_exact_installed_revision_and_cleans_images(self):
+        result = self.install(project="campus-prod", SMOKE_URL="https://example.invalid")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("DONE: verify public HTTPS endpoint", result.stdout)
+        commands = self.commands()
+        self.assertEqual([command["name"] for command in commands], ["ssh", "scp", "ssh", "ssh"])
+        self.assertEqual(shlex.split(commands[-1]["args"][-1]), [
+            "bash", "-s", "--", "/srv/campus releases", "campus-prod", REVISION,
+        ])
+        self.assertEqual(commands[-1]["stdin"], (self.root / "deploy/confirm-release.sh").read_text())
+
+    def test_public_check_failure_does_not_confirm_or_clean_images(self):
+        result = self.install(SMOKE_URL="https://example.invalid", FAKE_PUBLIC_FAILURE="1")
+        self.assertEqual(result.returncode, 60, result.stderr)
+        self.assertIn("FAILED: verify public HTTPS endpoint", result.stderr)
+        self.assertEqual([command["name"] for command in self.commands()], ["ssh", "scp", "ssh"])
+
     def test_real_ssh_connection_refused_fails_before_upload(self):
         real_ssh = shutil.which("ssh")
         self.assertIsNotNone(real_ssh)
         cli = self.bin / "ssh"
         cli.write_text("#!/usr/bin/env python3\nimport os,sys\nos.execv(" + repr(real_ssh) +
                        ", ['ssh', *sys.argv[1:]])\n")
-        # A bound, non-listening socket reserves a local port that refuses TCP.
+        # macOS can time out on a bound, non-listening socket; close it before connecting.
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
-            result = self.install(SSH_HOST="127.0.0.1", SSH_PORT=str(listener.getsockname()[1]), LC_ALL="C")
+            port = listener.getsockname()[1]
+        result = self.install(SSH_HOST="127.0.0.1", SSH_PORT=str(port), LC_ALL="C")
         self.assertEqual(result.returncode, 255, result.stderr)
         self.assertIn("Connection refused", result.stderr)
         self.assertEqual(self.commands(), [])

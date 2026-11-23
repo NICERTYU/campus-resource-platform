@@ -878,12 +878,6 @@ class ResourceService {
         || input.startTime() == null
         || input.requestId() == null
         || !input.requestId().matches("[A-Za-z0-9._:-]{1,100}")) throw ApiError.bad("限制命令参数不正确");
-    User actor = user(input.actorId());
-    if (type.equals("M2")) {
-      if (input.active()) require(actor, "ADMIN");
-      else if (!actor.has("APPLICANT") && !actor.has("ADMIN")) throw ApiError.forbidden();
-    } else if (!input.active()) require(actor, "ADMIN");
-    else if (!actor.has("TECHNICIAN") && !actor.has("ADMIN")) throw ApiError.forbidden();
     if (type.equals("M2")) TimeRules.interval(input.startTime(), input.endTime());
     else if (input.endTime() != null) throw ApiError.bad("维修限制的结束时间应为空");
     return tx.execute(
@@ -907,8 +901,21 @@ class ResourceService {
                       + " WHERE source_type=? AND source_id=?",
                   type,
                   sourceId);
-          if (!existing.isEmpty()) {
-            var row = existing.getFirst();
+          var row = existing.isEmpty() ? null : existing.getFirst();
+          if (row != null
+              && ((Number) row.get("version")).longValue() == input.version()
+              && digest.equals(row.get("command_hash"))) {
+            // A committed command can lose its response. Acknowledging it performs no writes,
+            // even if the original actor's account has since changed.
+            return new RestrictionResult(input.version(), (Boolean) row.get("active"), false);
+          }
+          User actor = user(input.actorId());
+          if (type.equals("M2")) {
+            if (input.active()) require(actor, "ADMIN");
+            else if (!actor.has("APPLICANT") && !actor.has("ADMIN")) throw ApiError.forbidden();
+          } else if (!input.active()) require(actor, "ADMIN");
+          else if (!actor.has("TECHNICIAN") && !actor.has("ADMIN")) throw ApiError.forbidden();
+          if (row != null) {
             long version = ((Number) row.get("version")).longValue();
             if (((Number) row.get("classroom_id")).longValue() != input.classroomId())
               throw ApiError.conflict("限制来源所属教室不能变更");
@@ -916,12 +923,8 @@ class ResourceService {
               sweepLocked(input.classroomId(), input.requestId());
               return new RestrictionResult(version, (Boolean) row.get("active"), false);
             }
-            if (input.version() == version) {
-              if (!row.get("command_hash").equals(digest))
-                throw new ApiError(409, "VERSION_CONFLICT", "同一版本参数不一致");
-              sweepLocked(input.classroomId(), input.requestId());
-              return new RestrictionResult(version, (Boolean) row.get("active"), false);
-            }
+            if (input.version() == version)
+              throw new ApiError(409, "VERSION_CONFLICT", "同一版本参数不一致");
           }
           if (!type.equals("M3") || !input.active())
             sweepLocked(input.classroomId(), input.requestId());

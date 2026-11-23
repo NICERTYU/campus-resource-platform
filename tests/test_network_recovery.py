@@ -15,6 +15,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -212,7 +213,8 @@ class RealNetworkRecovery(unittest.TestCase):
     def source_count(self, application):
         return int(self.sql("SELECT count(*) FROM resource.restrictions WHERE source_type='M2' AND source_id=%s AND active" % application["id"]))
 
-    def repair(self):
+    def repair(self, technician=None):
+        technician = technician or self.technician
         status, room = self.admin.request("POST", "/admin/classrooms", {
             "name": "M3网络恢复-" + uuid.uuid4().hex[:8], "building": "测试楼", "floor": 1,
             "department": None, "openTime": "08:00", "closeTime": "22:00", "enabled": True})
@@ -223,7 +225,7 @@ class RealNetworkRecovery(unittest.TestCase):
         self.assertEqual(status, 201, record)
         self.repair_ids.append(record["id"])
         status, record = self.request("POST", "/repair-orders/%s/assign" % record["id"],
-                                      {"technicianId": self.technician.user["id"]})
+                                      {"technicianId": technician.user["id"]})
         self.assertEqual(status, 200, record)
         return record
 
@@ -267,6 +269,46 @@ class RealNetworkRecovery(unittest.TestCase):
         self.assertEqual(self.repair_source_count(repair), 0)
         self.assertEqual(int(self.sql("SELECT version FROM resource.restrictions WHERE source_type='M3' AND source_id=%s" % repair["id"])), 2)
         self.assertEqual(int(self.sql("SELECT count(*) FROM resource.audit_logs WHERE object_type='M3' AND object_id=%s" % repair["id"])), 2)
+
+    def test_M3_committed_start_recovers_after_technician_is_disabled(self):
+        username = "retry_tech_" + uuid.uuid4().hex[:8]
+        profile = {"displayName": "恢复测试维修员", "department": None, "roles": ["TECHNICIAN"]}
+        status, account = self.admin.request("POST", "/admin/accounts", {
+            **profile, "username": username, "password": "Campus123!", "enabled": True})
+        self.assertEqual(status, 201, account)
+        account_path = "/admin/accounts/%s" % account["id"]
+        self.addCleanup(self.admin.request, "PUT", account_path, {**profile, "enabled": False})
+        technician = Client(username)
+        repair = self.repair(technician)
+        room = repair["classroomId"]
+        status, seat = self.admin.request("POST", "/admin/classrooms/%s/seats" % room,
+                                          {"label": "A01", "hasPower": False, "enabled": True})
+        self.assertIn(status, (200, 201), seat)
+        self.addCleanup(self.sql, "DELETE FROM resource.seats WHERE id=%s" % seat["id"])
+
+        FaultProxy.mode = "response-lost"
+        status, record = self.request("POST", "/repair-orders/%s/start" % repair["id"],
+                                      {}, key=uuid.uuid4().hex, client=technician)
+        self.assertEqual(status, 202, record)
+        self.assertEqual(record["pendingAction"], "START")
+        self.assertEqual(self.repair_source_count(repair), 1)
+        self.stop()
+        status, account = self.admin.request("PUT", account_path, {**profile, "enabled": False})
+        self.assertEqual(status, 200, account)
+        self.assertFalse(account["enabled"])
+        FaultProxy.mode = "normal"
+        self.launch()
+        self.eventually_repair(repair, "IN_PROGRESS")
+        self.assertEqual(self.repair_source_count(repair), 1)
+
+        start = (dt.datetime.now(SHANGHAI) + dt.timedelta(days=3)).replace(hour=14, minute=0, second=0, microsecond=0)
+        query = urllib.parse.urlencode({"classroomId": room, "startTime": start.isoformat(),
+                                        "endTime": (start + dt.timedelta(hours=1)).isoformat()})
+        status, seats = self.student.request("GET", "/seats/availability?" + query)
+        self.assertEqual(status, 200, seats)
+        self.assertEqual(len(seats), 1)
+        self.assertFalse(seats[0]["available"])
+        self.assertIn("M3", seats[0]["restrictionTypes"])
 
     def test_M3_timeout_scanning_survives_process_restart_without_releasing_maintenance(self):
         repair = self.repair()

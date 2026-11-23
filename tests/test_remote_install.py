@@ -12,6 +12,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "deploy/remote-install.sh"
+CONFIRM = ROOT / "deploy/confirm-release.sh"
 REVISION = "b" * 40
 OLD_REVISION = "a" * 40
 
@@ -31,6 +32,18 @@ if args == ["load"]:
     if os.environ.get("FAKE_LOAD_STALL") == "1":
         time.sleep(30)
     record(image_bytes=len(sys.stdin.buffer.read()))
+    sys.exit(0)
+if args == ["ps", "-aq"]:
+    print(os.environ.get("FAKE_CONTAINERS", ""))
+    sys.exit(0)
+if args[:2] == ["container", "inspect"]:
+    print(os.environ["FAKE_CONTAINER_IMAGE"])
+    sys.exit(0)
+if args[:2] == ["image", "ls"]:
+    print(os.environ.get("FAKE_IMAGES", ""))
+    sys.exit(0)
+if args[:2] == ["image", "rm"]:
+    record()
     sys.exit(0)
 if "up" in args:
     record()
@@ -121,6 +134,83 @@ class RemoteInstallTests(unittest.TestCase):
         self.assertEqual(self.current.read_text(), REVISION + "\n")
         self.assertFalse(self.previous.exists())
         self.assertEqual(self.migrations.read_text(), "1|initial schema|t\n")
+
+    def test_reinstalling_same_revision_preserves_previous_distinct_release(self):
+        self.deploy_root.mkdir()
+        self.current.write_text(OLD_REVISION + "\n")
+        for _ in range(2):
+            result = self.install()
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.current.read_text(), REVISION + "\n")
+        self.assertEqual(self.previous.read_text(), OLD_REVISION + "\n")
+
+        target = self.deploy_root / "releases" / OLD_REVISION / "deploy/compose.yml"
+        target.parent.mkdir(parents=True)
+        target.write_text("services: {}\n")
+        result = subprocess.run(["bash", str(ROOT / "scripts/rollback.sh"), str(self.deploy_root),
+                                 str(self.environment_file), "campus-test", OLD_REVISION],
+                                cwd=self.home, env=self.environment, capture_output=True,
+                                text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.current.read_text(), OLD_REVISION + "\n")
+        self.assertEqual(self.previous.read_text(), REVISION + "\n")
+        rollback = json.loads(self.log.read_text().splitlines()[-1])
+        self.assertEqual(rollback["commit"], OLD_REVISION)
+        self.assertIn(str(target), rollback["args"])
+        self.assertIn(["--pull", "never"], [rollback["args"][i:i + 2]
+                                           for i in range(len(rollback["args"]) - 1)])
+
+    def test_install_after_failed_public_check_prefers_last_verified_rollback_version(self):
+        verified = "c" * 40
+        self.deploy_root.mkdir()
+        self.current.write_text(OLD_REVISION + "\n")
+        (self.deploy_root / "campus-test.verified").write_text(verified + "\n")
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.current.read_text(), REVISION + "\n")
+        self.assertEqual(self.previous.read_text(), verified + "\n")
+
+    def confirm(self, revision=REVISION, **environment):
+        return subprocess.run(["bash", str(CONFIRM), str(self.deploy_root), "campus-test", revision],
+                              cwd=self.home, env=dict(self.environment, **environment),
+                              capture_output=True, text=True, timeout=10)
+
+    def test_confirmation_prunes_only_old_managed_images_without_containers(self):
+        self.deploy_root.mkdir()
+        self.current.write_text(OLD_REVISION + "\n")
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        production, old, used, unmanaged = (char * 40 for char in "cdef")
+        (self.deploy_root / "campus-prod.current").write_text(production + "\n")
+        for revision in (production, old, used):
+            marker = self.migrations.parent.parent / revision / self.migrations.name
+            marker.parent.mkdir()
+            marker.touch()
+        images = [f"{repo} {old} sha256:old-{repo}" for repo in (
+            "campus-workflow", "campus-resource", "campus-web")]
+        images += [f"campus-workflow {revision} sha256:{revision}" for revision in (
+            REVISION, OLD_REVISION, production, unmanaged)]
+        images += [f"campus-workflow {used} sha256:used", "campus-workflow local sha256:local",
+                   f"unrelated-app {old} sha256:outside"]
+
+        result = self.confirm(FAKE_IMAGES="\n".join(images), FAKE_CONTAINERS="stopped-container",
+                              FAKE_CONTAINER_IMAGE="sha256:used")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.deploy_root / "campus-test.verified").read_text(), REVISION + "\n")
+        commands = [json.loads(line)["args"] for line in self.log.read_text().splitlines()]
+        removed = [command[2:] for command in commands if command[:2] == ["image", "rm"]]
+        self.assertEqual(removed, [[f"{repo}:{old}"] for repo in (
+            "campus-workflow", "campus-resource", "campus-web")])
+
+    def test_outdated_confirmation_cannot_mark_release_verified_or_prune_images(self):
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        previous_log = self.log.read_text()
+        result = self.confirm(OLD_REVISION)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Installed version changed", result.stderr)
+        self.assertFalse((self.deploy_root / "campus-test.verified").exists())
+        self.assertEqual(self.log.read_text(), previous_log)
 
     def test_failed_up_does_not_update_any_release_record(self):
         self.deploy_root.mkdir()

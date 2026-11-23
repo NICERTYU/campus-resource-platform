@@ -108,17 +108,10 @@ jobs:
           SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
           DEPLOY_ROOT: ${{ secrets.DEPLOY_ROOT }}
           DEPLOY_ENV_FILE: ${{ secrets.DEPLOY_ENV_FILE }}
-        run: bash scripts/install-verified-release.sh campus-test
-      - name: Deployment HTTP smoke
-        if: steps.latest.outputs.current == 'true'
-        env:
           SMOKE_URL: ${{ vars.SMOKE_URL }}
         run: |
-          curl --fail --connect-timeout 10 --max-time 30 --retry 5 "$SMOKE_URL/"
-          curl --fail --connect-timeout 10 --max-time 30 --retry 5 "$SMOKE_URL/api/v1/auth/csrf" | python3 -c 'import json,sys; assert json.load(sys.stdin)["token"]'
-          status=$(curl --connect-timeout 10 --max-time 30 -sS -o /tmp/workflow-smoke.json -w '%{http_code}' "$SMOKE_URL/api/v1/classroom-applications")
-          [[ "$status" == 401 ]]
-          python3 -c 'import json; assert json.load(open("/tmp/workflow-smoke.json"))["code"] == "UNAUTHENTICATED"'
+          : "${SMOKE_URL:?Set the campus-test public HTTPS URL}"
+          bash scripts/install-verified-release.sh campus-test
   deploy-production:
     needs: verify
     timeout-minutes: 25
@@ -144,4 +137,7 @@ jobs:
           SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
           DEPLOY_ROOT: ${{ secrets.DEPLOY_ROOT }}
           DEPLOY_ENV_FILE: ${{ secrets.DEPLOY_ENV_FILE }}
-        run: bash scripts/install-verified-release.sh campus-prod
+          SMOKE_URL: ${{ vars.SMOKE_URL }}
+        run: |
+          : "${SMOKE_URL:?Set the campus-prod public HTTPS URL}"
+          bash scripts/install-verified-release.sh campus-prod

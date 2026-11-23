@@ -7,6 +7,10 @@ project="${1:?Usage: install-verified-release.sh campus-test|campus-prod}"
 : "${SSH_HOST:?}" "${SSH_USER:?}" "${SSH_KEY:?}" "${SSH_KNOWN_HOSTS:?}"
 : "${DEPLOY_ROOT:?}" "${DEPLOY_ENV_FILE:?}" "${GITHUB_SHA:?}"
 [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$DEPLOY_ROOT" == /* && "$DEPLOY_ENV_FILE" == /* ]] || exit 2
+if [[ -n "${SMOKE_URL:-}" && "$SMOKE_URL" != https://* ]]; then
+  echo '[deploy] SMOKE_URL must use HTTPS' >&2
+  exit 2
+fi
 upload_seconds="${DEPLOY_UPLOAD_TIMEOUT_SECONDS:-600}"
 [[ "$upload_seconds" =~ ^[1-9][0-9]{0,3}$ ]] && ((upload_seconds <= 3600)) || exit 2
 for command in ssh scp timeout; do command -v "$command" >/dev/null; done
@@ -71,3 +75,9 @@ printf -v remote_cmd 'bash -s -- %q %q %q %q' "$DEPLOY_ROOT" "$GITHUB_SHA" "$DEP
 run_phase 'remote image installation and service health' 600 \
   ssh "${ssh_options[@]}" -p "${SSH_PORT:-22}" "$SSH_USER@$SSH_HOST" "$remote_cmd" < deploy/remote-install.sh
 echo '[deploy] Verified release installation completed'
+if [[ -n "${SMOKE_URL:-}" ]]; then
+  run_phase 'verify public HTTPS endpoint' 120 bash scripts/smoke-release.sh "$SMOKE_URL"
+  printf -v remote_cmd 'bash -s -- %q %q %q' "$DEPLOY_ROOT" "$project" "$GITHUB_SHA"
+  run_phase 'confirm release and clean old images' 120 \
+    ssh "${ssh_options[@]}" -p "${SSH_PORT:-22}" "$SSH_USER@$SSH_HOST" "$remote_cmd" < deploy/confirm-release.sh
+fi

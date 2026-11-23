@@ -833,6 +833,28 @@ class ResourceIntegrationTest {
   }
 
   @Test
+  void committedRestrictionCanBeAcknowledgedAfterActorIsDisabled() {
+    long technician = user("technician").id();
+    var start = new RestrictionInput(1, true, 1, from(), null, technician, "m3-start");
+    assertTrue(service.restriction("M3", 1, start).applied());
+    db.update("UPDATE users SET enabled=false WHERE id=?", technician);
+
+    assertEquals(new RestrictionResult(1, true, false), service.restriction("M3", 1, start));
+    var changed =
+        new RestrictionInput(1, true, 1, from().plusMinutes(1), null, technician, "m3-changed");
+    assertThrows(ApiError.class, () -> service.restriction("M3", 1, changed));
+    var next = new RestrictionInput(2, true, 1, from(), null, technician, "m3-next");
+    assertEquals(
+        403, assertThrows(ApiError.class, () -> service.restriction("M3", 1, next)).status);
+    assertEquals(
+        1,
+        db.queryForObject(
+            "SELECT count(*) FROM audit_logs WHERE action='RESTRICTION_ESTABLISHED'",
+            Integer.class));
+    assertEquals(new RestrictionResult(1, true, false), service.restriction("M3", 1, start));
+  }
+
+  @Test
   void unsafeRoomAndSeatConfigurationChangesAreRejected() {
     service.reserve(user("student"), booking(1), null, "r1");
     var room = service.room(1);

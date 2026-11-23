@@ -54,8 +54,9 @@ class DeploymentBoundaryTests(unittest.TestCase):
         self.assertIn("bash scripts/install-verified-release.sh campus-test", workflow)
         self.assertIn("bash scripts/install-verified-release.sh campus-prod", workflow)
         self.assertIn("flock -w 180", (ROOT / "scripts/rollback.sh").read_text())
-        self.assertIn("workflow-smoke.json", workflow)
-        self.assertIn("/api/v1/auth/csrf", workflow)
+        self.assertEqual(workflow.count("SMOKE_URL: ${{ vars.SMOKE_URL }}"), 2)
+        self.assertIn("scripts/smoke-release.sh", (ROOT / "scripts/install-verified-release.sh").read_text())
+        self.assertIn("/api/v1/auth/csrf", (ROOT / "scripts/smoke-release.sh").read_text())
         self.assertIn("frontend_pid=$!", (ROOT / "scripts/dev.sh").read_text())
         self.assertIn("trap stop_on_signal INT TERM", (ROOT / "scripts/dev.sh").read_text())
 

@@ -80,6 +80,7 @@ M3-04 验证上报至评价闭环、返修/改派、重复和并发、超时恢�
 - 分派维修人员时使用 `/internal/v1/users?role=TECHNICIAN`，先按有效角色筛选，不因前200个学生账号占用名额而漏掉新维修人员。
 - `PUT /internal/v1/restrictions/{sourceType}/{sourceId}`，请求 `{version,active,classroomId,startTime,endTime,actorId,requestId}`，M2 使用申请区间，M3 建立时使用服务端当前时间且 endTime=null。
 - 返回 `{version,active,applied}`。相同版本同参数幂等；旧版本不执行并返回现有版本；相同版本不同内容409；解除保留版本墓碑。M2 创建检查个人预约、其他M2及M3；M3允许既有记录及多来源并存。来源归属教室不能变更。内部身份与命令响应携带请求标识。
+- 已提交的命令可由持有模块密钥的流程服务重发确认。来源、版本、有效状态、教室、时间和操作者一致时，资源服务返回当前结果和 `applied=false`，即使原操作者后来被停用或失去角色也适用。确认不修改限制或追加审计。新版本和不匹配的命令仍要按当前权限校验。
 
 跨应用操作先落库 outbox，网络在本地事务外，再提交最终状态。网络/5xx失败保留 pendingAction/lastError，每5秒重试。新两级M2的409资源冲突也保持PROCESSING并重试，超过审批期限后转为解除补偿；旧单级M2及M3的确定性资源冲突回到先前状态。解除使用递增版本，不允许旧建立请求重新生效；被超时或撤销替代的旧意图为SUPERSEDED。
 

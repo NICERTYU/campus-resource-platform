@@ -8,8 +8,10 @@ phase='acquire deployment lock'
 trap 'result=$?; printf "[deploy] FAILED: %s (exit %s)\n" "$phase" "$result" >&2; exit "$result"' ERR
 echo '[deploy] Waiting for deployment lock (limit 180s)'
 mkdir -p "$deploy_root/releases" "$deploy_root/locks"
-exec 9>"$deploy_root/locks/$project.lock"
+exec 9>"$deploy_root/locks/release-images.lock"
 flock -w 180 9
+exec 8>"$deploy_root/locks/$project.lock"
+flock -w 180 8
 release_dir="$deploy_root/releases/$revision"
 mkdir -p "$release_dir"
 phase='extract verified source'
@@ -38,8 +40,16 @@ timeout --signal=TERM --kill-after=10s 30s "${compose[@]}" exec -T --interactive
   > "$release_dir/migrations-$project.txt.tmp" </dev/null
 mv "$release_dir/migrations-$project.txt.tmp" "$release_dir/migrations-$project.txt"
 phase='record completed release'
-previous_file="$deploy_root/$project.current"
-if [[ -f "$previous_file" ]]; then cp "$previous_file" "$deploy_root/$project.previous"; fi
-printf '%s\n' "$revision" > "$previous_file.tmp"
-mv "$previous_file.tmp" "$previous_file"
+current_file="$deploy_root/$project.current"
+if [[ -f "$current_file" && "$(<"$current_file")" != "$revision" ]]; then
+  previous_source="$current_file"
+  verified_file="$deploy_root/$project.verified"
+  if [[ -f "$verified_file" && "$(<"$verified_file")" != "$revision" ]]; then
+    previous_source="$verified_file"
+  fi
+  cp "$previous_source" "$deploy_root/$project.previous.tmp"
+  mv "$deploy_root/$project.previous.tmp" "$deploy_root/$project.previous"
+fi
+printf '%s\n' "$revision" > "$current_file.tmp"
+mv "$current_file.tmp" "$current_file"
 echo "Deployed $project $revision"

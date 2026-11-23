@@ -175,32 +175,34 @@ class RemoteInstallTests(unittest.TestCase):
                               cwd=self.home, env=dict(self.environment, **environment),
                               capture_output=True, text=True, timeout=10)
 
-    def test_confirmation_prunes_only_old_managed_images_without_containers(self):
+    def test_confirmation_retains_five_versions_prioritizing_rollback_and_in_use_images(self):
         self.deploy_root.mkdir()
         self.current.write_text(OLD_REVISION + "\n")
         result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
-        production, old, used, unmanaged = (char * 40 for char in "cdef")
+        production, old, used, unmanaged, newest, middle = (char * 40 for char in "cdef01")
         (self.deploy_root / "campus-prod.current").write_text(production + "\n")
-        for revision in (production, old, used):
+        for order, revision in enumerate((production, OLD_REVISION, used, old, middle, newest), start=1):
             marker = self.migrations.parent.parent / revision / self.migrations.name
             marker.parent.mkdir()
             marker.touch()
+            os.utime(marker, (order, order))
         images = [f"{repo} {old} sha256:old-{repo}" for repo in (
             "campus-workflow", "campus-resource", "campus-web")]
         images += [f"campus-workflow {revision} sha256:{revision}" for revision in (
-            REVISION, OLD_REVISION, production, unmanaged)]
+            REVISION, OLD_REVISION, production, unmanaged, newest, middle)]
         images += [f"campus-workflow {used} sha256:used", "campus-workflow local sha256:local",
                    f"unrelated-app {old} sha256:outside"]
 
         result = self.confirm(FAKE_IMAGES="\n".join(images), FAKE_CONTAINERS="stopped-container",
                               FAKE_CONTAINER_IMAGE="sha256:used")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Retaining 5 managed release versions", result.stdout)
         self.assertEqual((self.deploy_root / "campus-test.verified").read_text(), REVISION + "\n")
         commands = [json.loads(line)["args"] for line in self.log.read_text().splitlines()]
         removed = [command[2:] for command in commands if command[:2] == ["image", "rm"]]
         self.assertEqual(removed, [[f"{repo}:{old}"] for repo in (
-            "campus-workflow", "campus-resource", "campus-web")])
+            "campus-workflow", "campus-resource", "campus-web")] + [[f"campus-workflow:{middle}"]])
 
     def test_outdated_confirmation_cannot_mark_release_verified_or_prune_images(self):
         result = self.install()
